@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    # Compose braucht die Variablen beim Parsen -> aus .env (Projekt-Root)
+    environment:
+      POSTGRES_USER: ${ODOO_DB_USER:-odoo}
+      POSTGRES_PASSWORD: ${ODOO_DB_PASS:-odoo}
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ODOO_DB_USER:-odoo} -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  odoo:
+    image: registry.local/odoo-runtime:18.0
+    depends_on:
+      db:
+        condition: service_healthy
+    # Diese Variablen braucht Odoo zur Laufzeit (werden vom Entrypoint in die Config geschrieben)
+    env_file:
+      - ./envs/demo.env
+    ports:
+      - "8069:8069"
+    volumes:
+      - odoo_data:/var/lib/odoo
+      - ./custom:/opt/odoo/custom:ro
+      - ./enterprise:/opt/odoo/enterprise:ro
+    restart: unless-stopped
+
+volumes:
+  pgdata: {}
+  odoo_data: {}

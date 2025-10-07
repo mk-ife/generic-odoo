@@ -1,0 +1,10 @@
+[options]
+db_host = ${PSQL_IP}
+db_port = ${PSQL_PORT}
+db_user = ${ODOO_DB_USER}
+db_password = ${ODOO_DB_PASS}
+admin_passwd = ${ODOO_ADMIN_PASS}
+workers = ${ODOO_WORKERS}
+logfile = /var/log/odoo/odoo.log
+data_dir = /var/lib/odoo
+addons_path = /opt/odoo/src/addons,/opt/odoo/custom,/opt/odoo/enterprise
