@@ -49,7 +49,8 @@ docker compose -p "${COMPOSE_PROJECT_NAME}" up -d --wait
 echo "Waiting for Odoo to be ready..."
 for i in $(seq 1 90); do
   if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
-    if curl -fsS -m 2 -H "Host: ${VIRTUAL_HOST}" http://127.0.0.1/web/login >/dev/null 2>&1; then
+    # Statt -H Host + 127.0.0.1 -> eindeutiger Test über echten Host via Port 80
+    if curl -fsS -m 2 --resolve "${VIRTUAL_HOST}:80:127.0.0.1" "http://${VIRTUAL_HOST}/web/login" >/dev/null 2>&1; then
       READY=1; break
     fi
   else
@@ -69,8 +70,9 @@ fi
 
 # Hints
 if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
-  echo "Test:   curl -sI -H 'Host: ${VIRTUAL_HOST}' http://127.0.0.1/web/login | sed -n '1,5p'"
+  echo "Test:   curl -sI --resolve '${VIRTUAL_HOST}:80:127.0.0.1' http://${VIRTUAL_HOST}/web/login | sed -n '1,5p'"
   echo "Open:   http://${VIRTUAL_HOST}/web"
+  echo "Note:   Request via Traefik (:80) – deshalb '--resolve …:80:127.0.0.1'."
 else
   echo "Port:   ${ODOO_PORT}"
   echo "Test:   curl -sI http://127.0.0.1:${ODOO_PORT}/web/login | sed -n '1,5p'"
