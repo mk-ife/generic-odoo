@@ -2,9 +2,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Compose-Erkennung laden
-source scripts/_dc.sh
-
 RAW_NAME="${1:-}"     # z.B. DemoA
 PORT="${2:-}"         # optional (nur ohne Traefik)
 HOST="${3:-}"         # optional (Traefik Host, z.B. demo1.91-107-228-241.nip.io)
@@ -44,14 +41,18 @@ if [[ "${TRAEFIK_ENABLE}" != "true" ]]; then
   export ODOO_PORT="${PORT}"
 fi
 
-# Start
-"${DC[@]}" -p "${COMPOSE_PROJECT_NAME}" up -d --wait
+# Start (ohne --wait, um Healthcheck-Race zu vermeiden)
+docker compose -p "${COMPOSE_PROJECT_NAME}" up -d
 
-# Readiness check (max 90s)
+# Optional: schnellen Überblick
+docker compose -p "${COMPOSE_PROJECT_NAME}" ps || true
+
+# Readiness check (max 120s)
 echo "Waiting for Odoo to be ready..."
 READY=0
-for i in $(seq 1 90); do
+for i in $(seq 1 120); do
   if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
+    # prüfe über Traefik/HTTP; via Host-Header direkt am lokalen Traefik
     if curl -fsS -m 2 -H "Host: ${VIRTUAL_HOST}" http://127.0.0.1/web/login >/dev/null 2>&1; then
       READY=1; break
     fi
@@ -64,8 +65,13 @@ for i in $(seq 1 90); do
 done
 
 if [[ "${READY}" != "1" ]]; then
-  echo "WARN: Odoo readiness check timed out. Check logs below:"
-  "${DC[@]}" -p "${COMPOSE_PROJECT_NAME}" logs --tail=200 || true
+  echo "WARN: Odoo readiness check timed out. Diagnostics:"
+  docker compose -p "${COMPOSE_PROJECT_NAME}" ps || true
+  echo "---- odoo logs (last 200 lines) ----"
+  docker compose -p "${COMPOSE_PROJECT_NAME}" logs --tail=200 odoo || true
+  echo "---- db logs (last 100 lines) ----"
+  docker compose -p "${COMPOSE_PROJECT_NAME}" logs --tail=100 db || true
+  exit 1
 else
   echo "==> Up: ${COMPOSE_PROJECT_NAME} is ready."
 fi
