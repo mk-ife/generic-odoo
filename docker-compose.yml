@@ -28,17 +28,19 @@ services:
       DB_USER: ${POSTGRES_USER:-odoo}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
       DESIRED_DB: ${POSTGRES_DB:-${COMPOSE_PROJECT_NAME}_db}
+    # WICHTIG: Unser Init-Ordner mounten und Entry starten
+    volumes:
+      - odoo_data:/var/lib/odoo
+      - ./addons:/mnt/extra-addons:ro
+      - ./scripts/odoo-init:/opt/odoo-init:ro
     command: ["/bin/bash","-lc","/opt/odoo-init/entry.sh"]
     healthcheck:
+      # reine TCP-Prüfung, egal welcher HTTP-Code
       test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/8069'"]
       interval: 10s
       timeout: 3s
       retries: 30
       start_period: 240s
-    volumes:
-      - odoo_data:/var/lib/odoo
-      - ./addons:/mnt/extra-addons:ro
-      - ./scripts/odoo-init:/opt/odoo-init:ro
     labels:
       - "traefik.enable=${TRAEFIK_ENABLE:-false}"
       - "traefik.docker.network=proxy"
