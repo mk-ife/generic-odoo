@@ -2,6 +2,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# --- Preflight: odoo-init.sh muss existieren und eine Datei sein ---
+if [[ ! -f scripts/odoo-init.sh ]]; then
+  echo "ERROR: scripts/odoo-init.sh fehlt! Bitte ins Repo committen (oder Pfad korrigieren)."
+  echo "Hint: git ls-files scripts/odoo-init.sh && ls -l scripts/odoo-init.sh"
+  exit 1
+fi
+chmod +x scripts/odoo-init.sh
+
 RAW_NAME="${1:-}"     # z.B. DemoA
 PORT="${2:-}"         # optional (nur ohne Traefik)
 HOST="${3:-}"         # optional (Traefik Host, z.B. demo1.91-107-228-241.nip.io)
@@ -32,7 +40,6 @@ fi
 
 # Port nur ohne Traefik verwenden
 if [[ "${TRAEFIK_ENABLE}" != "true" ]]; then
-  # Falls kein Port übergeben: automatisch berechnen (Basis 8069 + Hash)
   if [[ -z "${PORT:-}" ]]; then
     BASE=8069
     OFFSET=$(( ( $(echo -n "${COMPOSE_PROJECT_NAME}" | cksum | awk '{print $1}') % 200 ) ))
@@ -41,10 +48,8 @@ if [[ "${TRAEFIK_ENABLE}" != "true" ]]; then
   export ODOO_PORT="${PORT}"
 fi
 
-# Start (ohne --wait, um Healthcheck-Race zu vermeiden)
+# Start (ohne --wait; eigenes Readiness-Checking)
 docker compose -p "${COMPOSE_PROJECT_NAME}" up -d
-
-# Optional: schnellen Überblick
 docker compose -p "${COMPOSE_PROJECT_NAME}" ps || true
 
 # Readiness check (max 120s)
@@ -52,7 +57,6 @@ echo "Waiting for Odoo to be ready..."
 READY=0
 for i in $(seq 1 120); do
   if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
-    # prüfe über Traefik/HTTP; via Host-Header direkt am lokalen Traefik
     if curl -fsS -m 2 -H "Host: ${VIRTUAL_HOST}" http://127.0.0.1/web/login >/dev/null 2>&1; then
       READY=1; break
     fi
