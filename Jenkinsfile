@@ -15,6 +15,11 @@ pipeline {
     string(name: 'CUSTOMER',     defaultValue: '',   description: 'Optionaler Kundenname/Label')
     booleanParam(name: 'RUN_QS',    defaultValue: true,  description: 'Qualitätssicherung/Smoke-Tests ausführen')
     booleanParam(name: 'TEARDOWN',  defaultValue: false, description: 'Instanzen nach Pipeline wieder entfernen')
+
+    // NEU: QS-Template Checkout steuerbar inkl. Credentials
+    string(name: 'QA_TEMPLATE_REPO',   defaultValue: 'https://github.com/ifegmbh/ife-addons-repo-template', description: 'Repo-URL des QS-Templates')
+    string(name: 'QA_TEMPLATE_BRANCH', defaultValue: 'main', description: 'Branch des QS-Templates')
+    string(name: 'QA_TEMPLATE_CRED',   defaultValue: '', description: 'Jenkins Credentials ID (PAT/SSH). Leer = ohne Credentials versuchen')
   }
 
   environment {
@@ -33,7 +38,13 @@ pipeline {
     stage('Fetch QS Template (ife-addons-repo-template)') {
       steps {
         dir('qa-template') {
-          git branch: 'main', url: 'https://github.com/ifegmbh/ife-addons-repo-template'
+          script {
+            if (params.QA_TEMPLATE_CRED?.trim()) {
+              git url: params.QA_TEMPLATE_REPO, branch: params.QA_TEMPLATE_BRANCH, credentialsId: params.QA_TEMPLATE_CRED
+            } else {
+              git url: params.QA_TEMPLATE_REPO, branch: params.QA_TEMPLATE_BRANCH
+            }
+          }
         }
       }
     }
@@ -62,7 +73,6 @@ pipeline {
           OK=1
 
           if [[ -n "${DOMAIN_BASE}" ]]; then
-            # Traefik: via :80 und --resolve für den Jenkins-Agent
             for i in $(seq 1 "${COUNT}"); do
               NAME="${PREFIX}${i}"
               HOST="$(echo "${NAME}.${DOMAIN_BASE}" | tr '[:upper:]' '[:lower:]')"
@@ -73,7 +83,6 @@ pipeline {
               fi
             done
           else
-            # Ohne Traefik: Ports wie in instance-up.sh berechnet (8069 + OFFSET)
             for i in $(seq 1 "${COUNT}"); do
               NAME="${PREFIX}${i}"
               NAME_LC="$(echo "${NAME}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
@@ -88,7 +97,6 @@ pipeline {
             done
           fi
 
-          # (optional) weitere QS aus qa-template:
           if [[ -f qa-template/run_qs.sh ]]; then
             echo "[INFO] Starte qa-template/run_qs.sh …"
             bash qa-template/run_qs.sh || OK=0
