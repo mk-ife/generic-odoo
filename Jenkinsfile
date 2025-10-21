@@ -3,8 +3,8 @@ pipeline {
   options { timestamps() }
   parameters {
     string(name: 'COUNT',       defaultValue: '1',                        description: 'Wie viele Instanzen?')
-    string(name: 'PREFIX',      defaultValue: 'demo',                     description: 'Präfix für Instanznamen (demo => demo1, demo2, …)')
-    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io',    description: 'Traefik Domain-Basis (z.B. 91-107-228-241.nip.io)')
+    string(name: 'PREFIX',      defaultValue: 'demo',                     description: 'Präfix für Instanznamen (demo => demo1, …)')
+    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io',    description: 'Traefik Domain-Basis')
     string(name: 'PARALLEL',    defaultValue: '1',                        description: 'Parallel gestartete Jobs')
   }
   environment {
@@ -62,8 +62,8 @@ done
 echo "[odoo-init] starting odoo httpd..."
 exec odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}"
 BASH
-            chmod +x scripts/odoo-init/entry.sh
           fi
+          chmod +x scripts/odoo-init/entry.sh
           ls -l scripts/odoo-init/
         '''
       }
@@ -73,11 +73,20 @@ BASH
       steps {
         sh '''
           set -eux
-          docker compose config | sed -n '1,200p'
-          docker compose config | grep -A3 -n "odoo:" -n || true
-          # Erwartet: volumes: ./scripts/odoo-init:/opt/odoo-init:ro  &&  command: /opt/odoo-init/entry.sh
-          docker compose config | grep -F "./scripts/odoo-init:/opt/odoo-init:ro"
-          docker compose config | grep -F "/opt/odoo-init/entry.sh"
+          docker compose config > .compose.rendered.yaml
+          sed -n '1,200p' .compose.rendered.yaml
+
+          # Prüfe: Mount-Ziel existiert in Render
+          grep -q 'target: /opt/odoo-init' .compose.rendered.yaml
+
+          # Prüfe: Source-Pfad verweist auf Workspace/scripts/odoo-init
+          grep -q "source: ${WORKSPACE}/scripts/odoo-init" .compose.rendered.yaml
+
+          # Prüfe: Command ruft /opt/odoo-init/entry.sh auf
+          grep -q '/opt/odoo-init/entry.sh' .compose.rendered.yaml
+
+          # Safety: Datei wirklich vorhanden & ausführbar
+          test -x scripts/odoo-init/entry.sh
         '''
       }
     }
@@ -101,14 +110,12 @@ BASH
           for n in $(seq 1 "${COUNT}"); do
             host="${PREFIX}${n}.${DOMAIN_BASE}"
             echo "Smoke: ${host}"
-            # Warten bis Traefik routet (max. 120s)
             for i in $(seq 1 120); do
               if curl -fsSI --resolve "${host}:80:127.0.0.1" "http://${host}/web/login" | head -n1 | grep -E "200 OK|302 Found" >/dev/null; then
                 echo "OK: ${host} antwortet."; break
               fi
               sleep 1
             done
-            # finale Ausgabe (zur Sichtkontrolle)
             curl -sI --resolve "${host}:80:127.0.0.1" "http://${host}/web/login" | sed -n '1,5p'
           done
         '''
@@ -121,7 +128,9 @@ BASH
         set -eux
         echo "==== DIAG: docker compose ps ===="
         docker ps --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"
-        echo "==== DIAG: last logs per odoo/db (if exist) ===="
+        echo "==== DIAG: rendered compose (top) ===="
+        sed -n '1,120p' .compose.rendered.yaml || true
+        echo "==== DIAG: per-project logs ===="
         for n in $(seq 1 "${COUNT}"); do
           p="${PREFIX}${n}"
           echo "---- ${p} ps ----"
