@@ -13,7 +13,8 @@ echo "[odoo-init] DB=${DESIRED_DB} on ${DB_HOST}:${DB_PORT} (user=${DB_USER})"
 
 for i in {1..180}; do
   if bash -lc "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null; then
-    echo "[odoo-init] postgres reachable"; break
+    echo "[odoo-init] postgres reachable"
+    break
   fi
   sleep 1
 done
@@ -25,8 +26,12 @@ until [ $tries -ge 5 ]; do
   odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}" -i base --stop-after-init
   rc=$?
   set -e
-  [ $rc -eq 0 ] && echo "[odoo-init] base installed (or already up-to-date)" && break
-  tries=$((tries+1)); sleep 5
+  if [ $rc -eq 0 ]; then
+    echo "[odoo-init] base installed (or already up-to-date)"
+    break
+  fi
+  tries=$((tries+1))
+  sleep 5
 done
 
 echo "[odoo-init] starting odoo httpd..."
