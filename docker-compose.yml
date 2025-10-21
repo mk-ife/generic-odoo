@@ -27,12 +27,10 @@ services:
       DB_PORT: "5432"
       DB_USER: ${POSTGRES_USER:-odoo}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
-      # gewünschter DB-Name für -d:
       DESIRED_DB: ${POSTGRES_DB:-${COMPOSE_PROJECT_NAME}_db}
-    # wichtig: unser Script wirklich starten (kein altes Entry)
-    command: ["/bin/bash","-lc","/usr/local/bin/odoo-init.sh"]
+    # NEU: sicherer Zielpfad für unser Init-Script
+    command: ["/bin/bash","-lc","/opt/odoo-init/odoo-init.sh"]
     healthcheck:
-      # reine TCP-Prüfung, unabhängig vom HTTP-Code
       test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/8069'"]
       interval: 10s
       timeout: 3s
@@ -41,7 +39,8 @@ services:
     volumes:
       - odoo_data:/var/lib/odoo
       - ./addons:/mnt/extra-addons:ro
-      - ./scripts/odoo-init.sh:/usr/local/bin/odoo-init.sh:ro
+      # NEU: Mount auf konfliktfreien Pfad (nicht /usr/local/bin/odoo-init.sh)
+      - ./scripts/odoo-init.sh:/opt/odoo-init/odoo-init.sh:ro
     labels:
       - "traefik.enable=${TRAEFIK_ENABLE:-false}"
       - "traefik.docker.network=proxy"
