@@ -11,16 +11,13 @@ ODOO_DB_ARGS=(--db_host "${DB_HOST}" --db_port "${DB_PORT}" --db_user "${DB_USER
 
 echo "[odoo-init] DB=${DESIRED_DB} on ${DB_HOST}:${DB_PORT} (user=${DB_USER})"
 
-# Warten bis Postgres TCP offen ist
 for i in {1..180}; do
   if bash -lc "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null; then
-    echo "[odoo-init] postgres reachable"
-    break
+    echo "[odoo-init] postgres reachable"; break
   fi
   sleep 1
 done
 
-# Idempotent initialisieren
 tries=0
 until [ $tries -ge 5 ]; do
   set +e
@@ -28,12 +25,8 @@ until [ $tries -ge 5 ]; do
   odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}" -i base --stop-after-init
   rc=$?
   set -e
-  if [ $rc -eq 0 ]; then
-    echo "[odoo-init] base installed (or already up-to-date)"
-    break
-  fi
-  tries=$((tries+1))
-  sleep 5
+  [ $rc -eq 0 ] && echo "[odoo-init] base installed (or already up-to-date)" && break
+  tries=$((tries+1)); sleep 5
 done
 
 echo "[odoo-init] starting odoo httpd..."
