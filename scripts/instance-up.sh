@@ -2,6 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Compose-Erkennung laden
+source scripts/_dc.sh
+
 RAW_NAME="${1:-}"     # z.B. DemoA
 PORT="${2:-}"         # optional (nur ohne Traefik)
 HOST="${3:-}"         # optional (Traefik Host, z.B. demo1.91-107-228-241.nip.io)
@@ -35,7 +38,6 @@ if [[ "${TRAEFIK_ENABLE}" != "true" ]]; then
   # Falls kein Port übergeben: automatisch berechnen (Basis 8069 + Hash)
   if [[ -z "${PORT:-}" ]]; then
     BASE=8069
-    # einfache deterministische Port-Berechnung aus NAME (keine Kollisionen bei kleinen N)
     OFFSET=$(( ( $(echo -n "${COMPOSE_PROJECT_NAME}" | cksum | awk '{print $1}') % 200 ) ))
     PORT=$(( BASE + OFFSET ))
   fi
@@ -43,14 +45,14 @@ if [[ "${TRAEFIK_ENABLE}" != "true" ]]; then
 fi
 
 # Start
-docker compose -p "${COMPOSE_PROJECT_NAME}" up -d --wait
+"${DC[@]}" -p "${COMPOSE_PROJECT_NAME}" up -d --wait
 
 # Readiness check (max 90s)
 echo "Waiting for Odoo to be ready..."
+READY=0
 for i in $(seq 1 90); do
   if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
-    # Statt -H Host + 127.0.0.1 -> eindeutiger Test über echten Host via Port 80
-    if curl -fsS -m 2 --resolve "${VIRTUAL_HOST}:80:127.0.0.1" "http://${VIRTUAL_HOST}/web/login" >/dev/null 2>&1; then
+    if curl -fsS -m 2 -H "Host: ${VIRTUAL_HOST}" http://127.0.0.1/web/login >/dev/null 2>&1; then
       READY=1; break
     fi
   else
@@ -61,9 +63,9 @@ for i in $(seq 1 90); do
   sleep 1
 done
 
-if [[ "${READY:-0}" != "1" ]]; then
+if [[ "${READY}" != "1" ]]; then
   echo "WARN: Odoo readiness check timed out. Check logs below:"
-  docker compose -p "${COMPOSE_PROJECT_NAME}" logs --tail=200 || true
+  "${DC[@]}" -p "${COMPOSE_PROJECT_NAME}" logs --tail=200 || true
 else
   echo "==> Up: ${COMPOSE_PROJECT_NAME} is ready."
 fi
