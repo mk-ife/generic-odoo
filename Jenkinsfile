@@ -3,29 +3,22 @@ pipeline {
   options { timestamps() }
   parameters {
     string(name: 'COUNT', defaultValue: '1', description: 'Wie viele Instanzen?')
-    string(name: 'PREFIX', defaultValue: 'demo', description: 'Namenspräfix, z.B. demo')
+    string(name: 'PREFIX', defaultValue: 'demo', description: 'Präfix für Instanznamen')
     string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'Traefik Domain-Basis')
-    string(name: 'PARALLEL', defaultValue: '1', description: 'Wie viele parallel starten')
+    string(name: 'PARALLEL', defaultValue: '1', description: 'Parallel gestartete Jobs')
   }
   environment {
     DOCKER_CONFIG = "${WORKSPACE}/.docker"
   }
   stages {
     stage('Checkout') {
-      steps { checkout scm }
-    }
-
-    stage('Compute prefix') {
       steps {
-        script {
-          env.PREFIX_EFF = params.PREFIX?.trim()
-          if (!env.PREFIX_EFF) { error "PREFIX leer" }
-          echo "Using PREFIX: ${env.PREFIX_EFF}"
-        }
+        checkout scm
+        sh 'git rev-parse --short HEAD'
       }
     }
 
-    stage('Install docker compose (userland)') {
+    stage('Ensure docker compose CLI') {
       steps {
         sh '''
           set -eux
@@ -39,24 +32,57 @@ pipeline {
       }
     }
 
+    stage('Hotfix: ensure entry.sh exists') {
+      steps {
+        sh '''
+          set -eux
+          mkdir -p scripts/odoo-init
+          if [ ! -s scripts/odoo-init/entry.sh ]; then
+            cat > scripts/odoo-init/entry.sh <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+DB_HOST="${DB_HOST:-db}"
+DB_PORT="${DB_PORT:-5432}"
+DB_USER="${DB_USER:-odoo}"
+DB_PASSWORD="${DB_PASSWORD:-password}"
+DESIRED_DB="${DESIRED_DB:-${POSTGRES_DB:-${COMPOSE_PROJECT_NAME:-odoo}_db}}"
+ODOO_DB_ARGS=(--db_host "${DB_HOST}" --db_port "${DB_PORT}" --db_user "${DB_USER}" --db_password "${DB_PASSWORD}")
+echo "[odoo-init] DB=${DESIRED_DB} on ${DB_HOST}:${DB_PORT} (user=${DB_USER})"
+for i in {1..180}; do
+  if bash -lc "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null; then
+    echo "[odoo-init] postgres reachable"; break; fi; sleep 1; done
+tries=0
+until [ $tries -ge 5 ]; do
+  set +e
+  echo "[odoo-init] init attempt $((tries+1))/5: odoo -d ${DESIRED_DB} -i base --stop-after-init ${ODOO_DB_ARGS[*]}"
+  odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}" -i base --stop-after-init
+  rc=$?; set -e
+  [ $rc -eq 0 ] && { echo "[odoo-init] base installed (or already up-to-date)"; break; }
+  tries=$((tries+1)); sleep 5
+done
+echo "[odoo-init] starting odoo httpd..."
+exec odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}"
+BASH
+            chmod +x scripts/odoo-init/entry.sh
+          fi
+          ls -l scripts/odoo-init/
+        '''
+      }
+    }
+
     stage('Deploy batch') {
       steps {
         sh '''
           set -eux
           cd "$WORKSPACE"
-          ./scripts/instances-batch.sh "${COUNT}" "${PREFIX_EFF}" "${DOMAIN_BASE}" "${PARALLEL}"
-        '''
-      }
-    }
 
-    stage('Smoke (kurz)') {
-      when { expression { return params.COUNT?.toInteger() > 0 } }
-      steps {
-        sh '''
-          set -eux
-          FIRST="${PREFIX_EFF}1.${DOMAIN_BASE}"
-          echo "Check ${FIRST} via Traefik"
-          curl -sI --resolve "${FIRST}:80:127.0.0.1" "http://${FIRST}/web/login" | sed -n '1,5p'
+          # Compose muss deinen Ordner als /opt/odoo-init mounten und das Script starten
+          # (deine docker-compose.yml sollte bereits haben:)
+          #   volumes:
+          #     - ./scripts/odoo-init:/opt/odoo-init:ro
+          #   command: ["/bin/bash","-lc","/opt/odoo-init/entry.sh"]
+
+          ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}"
         '''
       }
     }
