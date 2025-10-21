@@ -1,0 +1,10 @@
+services:
+  odoo:
+    # Im CI nicht vom Hostpfad mounten, sondern ein Volume:
+    volumes:
+      - odoo_init:/opt/odoo-init:ro
+
+volumes:
+  # Pro Compose-Projekt (bzw -p Name) ein eigenes Volume:
+  odoo_init:
+    name: "odoo_init_${COMPOSE_PROJECT_NAME}"
