@@ -3,8 +3,6 @@ pipeline {
   options { timestamps() }
   environment {
     DOCKER_CONFIG = "${WORKSPACE}/.docker"
-    // WICHTIG: Override für CI aktivieren
-    COMPOSE_FILE  = "docker-compose.yml:docker-compose.ci.yml"
   }
   parameters {
     string(name: 'COUNT',       defaultValue: '1',                        description: 'Wie viele Instanzen?')
@@ -35,76 +33,63 @@ pipeline {
       }
     }
 
-    stage('Ensure init script (entry.sh) exists') {
+    stage('Ensure init script exists in workspace') {
       steps {
         sh '''
           set -eux
           mkdir -p scripts/odoo-init
           if [ ! -s scripts/odoo-init/entry.sh ]; then
-            cat > scripts/odoo-init/entry.sh <<'BASH'
-#!/usr/bin/env bash
-set -euo pipefail
-DB_HOST="${DB_HOST:-db}"
-DB_PORT="${DB_PORT:-5432}"
-DB_USER="${DB_USER:-odoo}"
-DB_PASSWORD="${DB_PASSWORD:-password}"
-DESIRED_DB="${DESIRED_DB:-${POSTGRES_DB:-${COMPOSE_PROJECT_NAME:-odoo}_db}}"
-ODOO_DB_ARGS=(--db_host "${DB_HOST}" --db_port "${DB_PORT}" --db_user "${DB_USER}" --db_password "${DB_PASSWORD}")
-echo "[odoo-init] DB=${DESIRED_DB} on ${DB_HOST}:${DB_PORT} (user=${DB_USER})"
-for i in {1..180}; do
-  if bash -lc "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null; then echo "[odoo-init] postgres reachable"; break; fi
-  sleep 1
-done
-tries=0
-until [ $tries -ge 5 ]; do
-  set +e
-  echo "[odoo-init] init attempt $((tries+1))/5: odoo -d ${DESIRED_DB} -i base --stop-after-init ${ODOO_DB_ARGS[*]}"
-  odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}" -i base --stop-after-init
-  rc=$?; set -e
-  [ $rc -eq 0 ] && { echo "[odoo-init] base installed (or already up-to-date)"; break; }
-  tries=$((tries+1)); sleep 5
-done
-echo "[odoo-init] starting odoo httpd..."
-exec odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}"
-BASH
+            echo "ERROR: scripts/odoo-init/entry.sh fehlt – bitte ins Repo committen!"
+            exit 1
           fi
-          chmod +x scripts/odoo-init/entry.sh
           ls -l scripts/odoo-init/
         '''
       }
     }
 
-    stage('Sanity (compose render incl. CI override)') {
+    stage('Sanity: compose render (expect /opt/odoo-init as volume)') {
       steps {
         sh '''
           set -eux
           docker compose config > .compose.rendered.yaml
           sed -n '1,200p' .compose.rendered.yaml
 
-          # WICHTIG: Mit CI-Override muss das Ziel /opt/odoo-init ein Volume sein:
-          grep -q 'target: /opt/odoo-init' .compose.rendered.yaml
-          grep -q 'type: volume' .compose.rendered.yaml
-          # Standard-Projektname ist der Ordnername -> generic-odoo
-          grep -q 'source: odoo_init_generic-odoo' .compose.rendered.yaml || true
+          # Stelle sicher: /opt/odoo-init ist KEIN Host-Bind
+          awk '
+            $0 ~ /odoo:/ { in_odoo=1 }
+            in_odoo && $0 ~ /target: \\/opt\\/odoo-init/ { seen_target=1; next }
+            in_odoo && seen_target && $0 ~ /type: bind/ { bad=1 }
+            END { if (bad) { print "Found bind mount for /opt/odoo-init (should be volume)"; exit 1 } }
+          ' .compose.rendered.yaml
         '''
       }
     }
 
-    stage('Prep init volumes (copy entry.sh into per-project volume)') {
+    stage('Prep init volumes (copy entry.sh into <project>_odoo_init)') {
       steps {
         sh '''
           set -eux
           COUNT="${COUNT:-1}"
           for n in $(seq 1 "${COUNT}"); do
             NAME="${PREFIX}${n}"
-            VOL="odoo_init_${NAME}"
+
+            # Compose generiert Volume-Name automatisch: <project>_<volume> == <NAME>_odoo_init
+            VOL="${NAME}_odoo_init"
             echo "==> Preparing volume ${VOL}"
             docker volume create "${VOL}" >/dev/null
-            # Inhalt reinkopieren (Rechte sicherstellen)
+
+            # kopiere aus Workspace ins Volume
             docker run --rm \
               -v "${VOL}:/dst" \
               -v "$PWD/scripts/odoo-init:/src:ro" \
-              alpine:3 sh -lc 'set -e; rm -rf /dst/*; cp -r /src/. /dst/; chmod 755 /dst/entry.sh; ls -l /dst'
+              alpine:3 sh -lc '
+                set -e
+                test -s /src/entry.sh
+                rm -rf /dst/* || true
+                cp -r /src/. /dst/
+                chmod 755 /dst/entry.sh
+                ls -l /dst
+              '
           done
         '''
       }
@@ -145,10 +130,10 @@ BASH
     failure {
       sh '''
         set -eux
-        echo "==== DIAG: docker compose ps (global) ===="
+        echo "==== DIAG: docker ps ===="
         docker ps --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"
         echo "==== DIAG: rendered compose (top) ===="
-        sed -n '1,160p' .compose.rendered.yaml || true
+        sed -n '1,200p' .compose.rendered.yaml || true
         echo "==== DIAG: per-project logs ===="
         for n in $(seq 1 "${COUNT}"); do
           p="${PREFIX}${n}"
