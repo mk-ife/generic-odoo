@@ -1,141 +1,175 @@
 pipeline {
   agent any
-
-  options {
-    timestamps()
-    disableConcurrentBuilds()
-    timeout(time: 45, unit: 'MINUTES')
-  }
+  options { timestamps() }
 
   parameters {
-    string(name: 'COUNT',        defaultValue: '2',  description: 'Anzahl der Odoo-Instanzen')
-    string(name: 'PREFIX',       defaultValue: 'demo', description: 'Präfix für Instanznamen (demo -> demo1, demo2 …)')
-    string(name: 'DOMAIN_BASE',  defaultValue: '',   description: 'Traefik-Domain-Basis, z.B. 91-107-228-241.nip.io (leer = ohne Traefik)')
-    string(name: 'PARALLEL',     defaultValue: '5',  description: 'Parallel gestartete Instanzen im Batch')
-    string(name: 'CUSTOMER',     defaultValue: '',   description: 'Optionaler Kundenname/Label')
-    booleanParam(name: 'RUN_QS',    defaultValue: true,  description: 'Qualitätssicherung/Smoke-Tests ausführen')
-    booleanParam(name: 'TEARDOWN',  defaultValue: false, description: 'Instanzen nach Pipeline wieder entfernen')
-
-    // NEU: QS-Template Checkout steuerbar inkl. Credentials
-    string(name: 'QA_TEMPLATE_REPO',   defaultValue: 'https://github.com/ifegmbh/ife-addons-repo-template', description: 'Repo-URL des QS-Templates')
-    string(name: 'QA_TEMPLATE_BRANCH', defaultValue: 'main', description: 'Branch des QS-Templates')
-    string(name: 'QA_TEMPLATE_CRED',   defaultValue: '', description: 'Jenkins Credentials ID (PAT/SSH). Leer = ohne Credentials versuchen')
-  }
-
-  environment {
-    RUN_TAG = "${env.JOB_NAME}-${env.BUILD_NUMBER}"
-    LOGDIR  = "logs-${env.BUILD_NUMBER}"
+    string(name: 'COUNT',        defaultValue: '5',  description: 'Wie viele Instanzen starten (instances-batch.sh <COUNT>)')
+    string(name: 'PREFIX',       defaultValue: 'demo', description: 'Namenspräfix (demo1, demo2, …). Kann pro Lauf eindeutig gemacht werden.')
+    string(name: 'DOMAIN_BASE',  defaultValue: '91-107-228-241.nip.io', description: 'Leer = ohne Traefik; sonst Domain (Traefik nötig)')
+    string(name: 'PARALLEL',     defaultValue: '5',  description: 'Wie viele Instanzen parallel starten')
+    booleanParam(name: 'ADD_BUILDNUM_TO_PREFIX', defaultValue: true, description: 'Präfix um BUILD_NUMBER erweitern (vermeidet Kollisionen)')
   }
 
   stages {
     stage('Checkout generic-odoo') {
       steps {
         checkout scm
-        sh 'git rev-parse --short HEAD || true'
+        sh 'git rev-parse --short HEAD'
       }
     }
 
-    stage('Fetch QS Template (ife-addons-repo-template)') {
+    stage('Compute prefix') {
       steps {
-        dir('qa-template') {
-          script {
-            if (params.QA_TEMPLATE_CRED?.trim()) {
-              git url: params.QA_TEMPLATE_REPO, branch: params.QA_TEMPLATE_BRANCH, credentialsId: params.QA_TEMPLATE_CRED
-            } else {
-              git url: params.QA_TEMPLATE_REPO, branch: params.QA_TEMPLATE_BRANCH
-            }
+        script {
+          if (params.ADD_BUILDNUM_TO_PREFIX) {
+            // ergibt z.B. "demo21-" -> Instanzen demo21-1, demo21-2, …
+            env.EFFECTIVE_PREFIX = "${params.PREFIX}${env.BUILD_NUMBER}-"
+          } else {
+            env.EFFECTIVE_PREFIX = params.PREFIX
           }
+          echo "Using PREFIX: ${env.EFFECTIVE_PREFIX}"
         }
       }
     }
 
-    stage('Start Instances') {
+    stage('Deploy batch') {
       steps {
         sh '''
-          set -euo pipefail
-          mkdir -p "${LOGDIR}"
-          chmod +x scripts/*.sh
-
-          echo "[INFO] Batch-Start: COUNT=${COUNT} PREFIX=${PREFIX} DOMAIN_BASE=${DOMAIN_BASE} PARALLEL=${PARALLEL}"
-          ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}"
-
-          echo "[INFO] Batch-Start abgeschlossen."
+          set -eux
+          cd "${WORKSPACE}"
+          # Batch-Start (Traefik aktiv, wenn DOMAIN_BASE nicht leer ist)
+          ./scripts/instances-batch.sh "${COUNT}" "${EFFECTIVE_PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}"
         '''
       }
     }
 
-    stage('Smoke & QS') {
-      when { expression { return params.RUN_QS } }
+    stage('Smoke Tests') {
       steps {
         sh '''
-          set -euo pipefail
-          echo "[INFO] QS/Smoke-Tests starten …"
-          OK=1
+          set -eux
+          cd "${WORKSPACE}"
 
-          if [[ -n "${DOMAIN_BASE}" ]]; then
-            for i in $(seq 1 "${COUNT}"); do
-              NAME="${PREFIX}${i}"
-              HOST="$(echo "${NAME}.${DOMAIN_BASE}" | tr '[:upper:]' '[:lower:]')"
-              echo "[TEST] ${HOST} /web/login"
-              if ! curl -fsS -m 5 --resolve "${HOST}:80:127.0.0.1" "http://${HOST}/web/login" > /dev/null ; then
-                echo "[ERROR] Smoke-Test fehlgeschlagen: ${HOST}"
-                OK=0
+          # kleine Helfer:
+          curl_head_ok() {
+            url="$1"
+            hosthdr="$2"   # leer = ohne Host-Override
+            if [ -n "$hosthdr" ]; then
+              code=$(curl -sI --max-time 5 --resolve "$hosthdr" "$url" -o /dev/null -w '%{http_code}')
+            else
+              code=$(curl -sI --max-time 5 "$url" -o /dev/null -w '%{http_code}')
+            fi
+            [ "$code" = "200" ]
+          }
+
+          for n in $(seq 1 ${COUNT}); do
+            proj="${EFFECTIVE_PREFIX}${n}"
+            odoo_ct="${proj}-odoo-1"
+            db_ct="${proj}-db-1"
+
+            echo "== Smoke for project: ${proj}"
+
+            # 1) Container-Health (odoo)
+            health=$(docker inspect -f '{{.State.Health.Status}}' "${odoo_ct}")
+            echo "   odoo health: ${health}"
+            test "${health}" = "healthy"
+
+            # 2) Volumes exist & sind eindeutig
+            docker volume inspect "odoo_${proj}_data" >/dev/null
+            docker volume inspect "pg_${proj}_data" >/dev/null
+
+            # 3) HTTP erreichbar
+            if [ -n "${DOMAIN_BASE}" ]; then
+              host="${proj}.${DOMAIN_BASE}"
+              echo "   test via Traefik: http://${host}/web/login"
+              curl_head_ok "http://${host}/web/login" "${host}:80:127.0.0.1"
+            else
+              # ohne Traefik: Port wurde in instance-up berechnet; wir lesen ihn aus dem Container-Netz (published Ports)
+              # Falls kein Publish existiert, testen intern via Container-IP.
+              port=$(docker inspect -f '{{(index (index .NetworkSettings.Ports "8069/tcp") 0).HostPort}}' "${odoo_ct}" 2>/dev/null || true)
+              if [ -n "${port}" ] && [ "${port}" != "<no value>" ]; then
+                echo "   test via localhost:${port}"
+                curl_head_ok "http://127.0.0.1:${port}/web/login" ""
+              else
+                ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${odoo_ct}")
+                echo "   test via container ip ${ip}:8069"
+                code=$(docker exec "${odoo_ct}" sh -lc "curl -sI http://127.0.0.1:8069/web/login -o /dev/null -w '%{http_code}'")
+                [ "$code" = "200" ]
               fi
-            done
-          else
-            for i in $(seq 1 "${COUNT}"); do
-              NAME="${PREFIX}${i}"
-              NAME_LC="$(echo "${NAME}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
-              NAME_LC="$(echo "${NAME_LC}" | sed 's/^[^a-z0-9]//')"
-              OFFSET=$(echo -n "${NAME_LC}" | cksum | awk '{print $1 % 200}')
-              PORT=$((8069 + OFFSET))
-              echo "[TEST] ${NAME_LC} -> http://127.0.0.1:${PORT}/web/login"
-              if ! curl -fsS -m 5 "http://127.0.0.1:${PORT}/web/login" > /dev/null ; then
-                echo "[ERROR] Smoke-Test fehlgeschlagen: ${NAME_LC} Port=${PORT}"
-                OK=0
-              fi
-            done
-          fi
+            fi
 
-          if [[ -f qa-template/run_qs.sh ]]; then
-            echo "[INFO] Starte qa-template/run_qs.sh …"
-            bash qa-template/run_qs.sh || OK=0
-          else
-            echo "[WARN] qa-template/run_qs.sh nicht gefunden – übersprungen."
-          fi
-
-          if [[ "${OK}" != "1" ]]; then
-            echo "[FAIL] QS/Smoke-Tests fehlgeschlagen."
-            exit 2
-          fi
-          echo "[OK] QS/Smoke-Tests bestanden."
-        '''
-      }
-    }
-
-    stage('Logs sammeln') {
-      steps {
-        sh '''
-          set -euo pipefail
-          mkdir -p "${LOGDIR}"
-
-          for i in $(seq 1 "${COUNT}"); do
-            NAME="${PREFIX}${i}"
-            NAME_LC="$(echo "${NAME}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
-            NAME_LC="$(echo "${NAME_LC}" | sed 's/^[^a-z0-9]//')"
-            echo "[INFO] Sammle Logs für ${NAME_LC} …"
-            docker compose -p "${NAME_LC}" logs --no-color > "${LOGDIR}/${NAME_LC}.log" 2>&1 || true
+            # 4) DB-Container läuft
+            db_state=$(docker inspect -f '{{.State.Status}}' "${db_ct}")
+            echo "   db state: ${db_state}"
+            test "${db_state}" = "running"
           done
 
-          {
-            echo "RUN_TAG=${RUN_TAG}"
-            echo "CUSTOMER=${CUSTOMER}"
-            echo "COUNT=${COUNT}"
-            echo "PREFIX=${PREFIX}"
-            echo "DOMAIN_BASE=${DOMAIN_BASE}"
-            echo "PARALLEL=${PARALLEL}"
-            date -Iseconds
-          } > "${LOGDIR}/run-meta.txt"
+          echo "Smoke OK for ${COUNT} instance(s)."
+        '''
+      }
+    }
+
+    stage('Rollback-Isolation Test') {
+      steps {
+        sh '''
+          set -eux
+          cd "${WORKSPACE}"
+
+          # Wir stoppen 1 Instanz und prüfen, dass die anderen weiterhin OK sind
+          first_proj="${EFFECTIVE_PREFIX}1"
+          echo "Stopping 1 instance for rollback test: ${first_proj}"
+          docker compose -p "${first_proj}" stop odoo
+
+          # Prüfe alle anderen (2..COUNT)
+          if [ "${COUNT}" -ge 2 ]; then
+            for n in $(seq 2 ${COUNT}); do
+              proj="${EFFECTIVE_PREFIX}${n}"
+              odoo_ct="${proj}-odoo-1"
+
+              # health
+              health=$(docker inspect -f '{{.State.Health.Status}}' "${odoo_ct}")
+              echo "   ${proj} health: ${health}"
+              test "${health}" = "healthy"
+
+              # HTTP
+              if [ -n "${DOMAIN_BASE}" ]; then
+                host="${proj}.${DOMAIN_BASE}"
+                code=$(curl -sI --max-time 5 --resolve "${host}:80:127.0.0.1" "http://${host}/web/login" -o /dev/null -w '%{http_code}')
+                [ "$code" = "200" ]
+              else
+                port=$(docker inspect -f '{{(index (index .NetworkSettings.Ports "8069/tcp") 0).HostPort}}' "${odoo_ct}" 2>/dev/null || true)
+                if [ -n "${port}" ] && [ "${port}" != "<no value>" ]; then
+                  code=$(curl -sI --max-time 5 "http://127.0.0.1:${port}/web/login" -o /dev/null -w '%{http_code}')
+                  [ "$code" = "200" ]
+                else
+                  code=$(docker exec "${odoo_ct}" sh -lc "curl -sI http://127.0.0.1:8069/web/login -o /dev/null -w '%{http_code}'")
+                  [ "$code" = "200" ]
+                fi
+              fi
+            done
+          fi
+
+          # Starten wir die 1. Instanz wieder (sauberer Abschluss)
+          docker compose -p "${first_proj}" start odoo || true
+          echo "Rollback/Isolation OK."
+        '''
+      }
+    }
+
+    stage('Hints / URLs') {
+      steps {
+        sh '''
+          set -eu
+          if [ -n "${DOMAIN_BASE}" ]; then
+            for n in $(seq 1 ${COUNT}); do
+              host="${EFFECTIVE_PREFIX}${n}.${DOMAIN_BASE}"
+              echo "Open:   http://${host}/web"
+              echo "Test:   curl -sI --resolve '${host}:80:127.0.0.1' http://${host}/web/login | sed -n '1,5p'"
+              echo "Note:   Request via Traefik (:80) – deshalb '--resolve …:80:127.0.0.1'."
+              echo
+            done
+          else
+            echo "Ohne Traefik: Ports werden automatisch berechnet; siehe 'docker ps' -> HostPort für 8069/tcp."
+          fi
         '''
       }
     }
@@ -143,29 +177,7 @@ pipeline {
 
   post {
     always {
-      archiveArtifacts artifacts: "${LOGDIR}/**", allowEmptyArchive: true
-    }
-    success {
-      echo "Pipeline erfolgreich – Umgebungen bleiben aktiv (TEARDOWN=${params.TEARDOWN})."
-    }
-    unsuccessful {
-      echo "Pipeline fehlgeschlagen – Logs archiviert. TEARDOWN=${params.TEARDOWN}"
-    }
-    cleanup {
-      script {
-        if (params.TEARDOWN) {
-          sh '''
-            set -euo pipefail
-            echo "[CLEANUP] TearDown aktiviert – entferne Instanzen."
-            for i in $(seq 1 "${COUNT}"); do
-              NAME="${PREFIX}${i}"
-              ./scripts/instance-down.sh "${NAME}" || true
-            done
-          '''
-        } else {
-          echo "[CLEANUP] TearDown aus – Instanzen bleiben für manuelle QS stehen."
-        }
-      }
+      echo "Build ${env.BUILD_NUMBER} finished (result: ${currentBuild.currentResult})"
     }
   }
 }
