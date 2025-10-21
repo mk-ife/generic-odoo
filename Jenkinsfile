@@ -1,22 +1,17 @@
 pipeline {
   agent any
   options { timestamps() }
-  environment {
-    DOCKER_CONFIG = "${WORKSPACE}/.docker"
-  }
+  environment { DOCKER_CONFIG = "${WORKSPACE}/.docker" }
   parameters {
-    string(name: 'COUNT',       defaultValue: '1',                        description: 'Wie viele Instanzen?')
-    string(name: 'PREFIX',      defaultValue: 'demo',                     description: 'Präfix (demo => demo1, …)')
-    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io',    description: 'Traefik Domain-Basis')
-    string(name: 'PARALLEL',    defaultValue: '1',                        description: 'Parallel gestartete Jobs')
+    string(name: 'COUNT',       defaultValue: '1')
+    string(name: 'PREFIX',      defaultValue: 'demo')
+    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io')
+    string(name: 'PARALLEL',    defaultValue: '1')
   }
 
   stages {
     stage('Checkout') {
-      steps {
-        checkout scm
-        sh 'git rev-parse --short HEAD'
-      }
+      steps { checkout scm; sh 'git rev-parse --short HEAD' }
     }
 
     stage('Ensure docker compose CLI') {
@@ -37,12 +32,9 @@ pipeline {
       steps {
         sh '''
           set -eux
-          mkdir -p scripts/odoo-init
-          if [ ! -s scripts/odoo-init/entry.sh ]; then
-            echo "ERROR: scripts/odoo-init/entry.sh fehlt – bitte ins Repo committen!"
-            exit 1
-          fi
-          ls -l scripts/odoo-init/
+          test -s scripts/odoo-init/entry.sh
+          ls -l scripts/odoo-init
+          sed -n '1,20p' scripts/odoo-init/entry.sh
         '''
       }
     }
@@ -53,8 +45,6 @@ pipeline {
           set -eux
           docker compose config > .compose.rendered.yaml
           sed -n '1,200p' .compose.rendered.yaml
-
-          # Stelle sicher: /opt/odoo-init ist KEIN Host-Bind
           awk '
             $0 ~ /odoo:/ { in_odoo=1 }
             in_odoo && $0 ~ /target: \\/opt\\/odoo-init/ { seen_target=1; next }
@@ -72,23 +62,23 @@ pipeline {
           COUNT="${COUNT:-1}"
           for n in $(seq 1 "${COUNT}"); do
             NAME="${PREFIX}${n}"
-
-            # Compose generiert Volume-Name automatisch: <project>_<volume> == <NAME>_odoo_init
             VOL="${NAME}_odoo_init"
             echo "==> Preparing volume ${VOL}"
             docker volume create "${VOL}" >/dev/null
 
-            # kopiere aus Workspace ins Volume
+            # Debug: Zeige Workspace-Dateien, dann sauber kopieren:
             docker run --rm \
               -v "${VOL}:/dst" \
               -v "$PWD/scripts/odoo-init:/src:ro" \
               alpine:3 sh -lc '
-                set -e
+                set -euo pipefail
+                echo "-- /src listing --"; ls -l /src || true
                 test -s /src/entry.sh
                 rm -rf /dst/* || true
-                cp -r /src/. /dst/
-                chmod 755 /dst/entry.sh
-                ls -l /dst
+                mkdir -p /dst
+                install -m 0755 /src/entry.sh /dst/entry.sh
+                echo "-- /dst listing --"; ls -l /dst
+                echo "-- head of entry.sh --"; sed -n "1,20p" /dst/entry.sh
               '
           done
         '''
@@ -132,17 +122,19 @@ pipeline {
         set -eux
         echo "==== DIAG: docker ps ===="
         docker ps --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"
-        echo "==== DIAG: rendered compose (top) ===="
-        sed -n '1,200p' .compose.rendered.yaml || true
-        echo "==== DIAG: per-project logs ===="
-        for n in $(seq 1 "${COUNT}"); do
-          p="${PREFIX}${n}"
-          echo "---- ${p} ps ----"
+        for n in $(seq 1 "${COUNT:-1}"); do
+          p="${PREFIX:-demo}${n}"
+          echo "---- ${p} compose ps ----"
           docker compose -p "${p}" ps || true
           echo "---- ${p} logs odoo (tail 200) ----"
           docker compose -p "${p}" logs --tail=200 odoo || true
           echo "---- ${p} logs db (tail 100) ----"
           docker compose -p "${p}" logs --tail=100 db || true
+          echo "---- Inspect ${p}_odoo_init volume ----"
+          VID="$(docker volume ls -q | grep -E "^${p}_odoo_init$" || true)"
+          if [ -n "$VID" ]; then
+            docker run --rm -v "${VID}:/v" alpine:3 sh -lc 'ls -l /v; sed -n "1,20p" /v/entry.sh || true'
+          fi
         done
       '''
     }
