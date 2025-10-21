@@ -28,7 +28,6 @@ services:
       DB_USER: ${POSTGRES_USER:-odoo}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
       DESIRED_DB: ${POSTGRES_DB:-${COMPOSE_PROJECT_NAME}_db}
-    # Startet unser Skript aus dem gemounteten Verzeichnis
     command: ["/bin/bash","-lc","/opt/odoo-init/entry.sh"]
     healthcheck:
       test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/8069'"]
@@ -39,7 +38,6 @@ services:
     volumes:
       - odoo_data:/var/lib/odoo
       - ./addons:/mnt/extra-addons:ro
-      # Mount GANZES Verzeichnis -> keine Dateikonflikte mehr
       - ./scripts/odoo-init:/opt/odoo-init:ro
     labels:
       - "traefik.enable=${TRAEFIK_ENABLE:-false}"

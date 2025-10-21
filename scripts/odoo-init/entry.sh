@@ -11,7 +11,7 @@ ODOO_DB_ARGS=(--db_host "${DB_HOST}" --db_port "${DB_PORT}" --db_user "${DB_USER
 
 echo "[odoo-init] DB=${DESIRED_DB} on ${DB_HOST}:${DB_PORT} (user=${DB_USER})"
 
-# Warten bis Postgres TCP offen ist
+# Warten bis Postgres TCP offen ist (max 180s)
 for i in {1..180}; do
   if bash -lc "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null; then
     echo "[odoo-init] postgres reachable"
@@ -20,7 +20,7 @@ for i in {1..180}; do
   sleep 1
 done
 
-# Idempotent initialisieren
+# Idempotent initialisieren (5 Versuche)
 tries=0
 until [ $tries -ge 5 ]; do
   set +e
