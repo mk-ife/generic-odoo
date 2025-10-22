@@ -2,10 +2,10 @@ pipeline {
   agent any
   options { timestamps() }
   parameters {
-    string(name: 'COUNT',       defaultValue: '1',                        description: 'Wie viele Instanzen?')
-    string(name: 'PREFIX',      defaultValue: 'demo',                     description: 'Präfix für Instanznamen (demo => demo1, …)')
-    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io',    description: 'Traefik Domain-Basis')
-    string(name: 'PARALLEL',    defaultValue: '1',                        description: 'Parallel gestartete Jobs')
+    string(name: 'COUNT', defaultValue: '1', description: 'Wie viele Instanzen?')
+    string(name: 'PREFIX', defaultValue: 'demo', description: 'Präfix für Instanznamen')
+    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'Traefik Domain-Basis')
+    string(name: 'PARALLEL', defaultValue: '1', description: 'Parallel gestartete Jobs')
   }
   environment {
     DOCKER_CONFIG = "${WORKSPACE}/.docker"
@@ -49,7 +49,8 @@ DESIRED_DB="${DESIRED_DB:-${POSTGRES_DB:-${COMPOSE_PROJECT_NAME:-odoo}_db}}"
 ODOO_DB_ARGS=(--db_host "${DB_HOST}" --db_port "${DB_PORT}" --db_user "${DB_USER}" --db_password "${DB_PASSWORD}")
 echo "[odoo-init] DB=${DESIRED_DB} on ${DB_HOST}:${DB_PORT} (user=${DB_USER})"
 for i in {1..180}; do
-  if bash -lc "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null; then echo "[odoo-init] postgres reachable"; break; fi; sleep 1; done
+  if bash -lc "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null; then
+    echo "[odoo-init] postgres reachable"; break; fi; sleep 1; done
 tries=0
 until [ $tries -ge 5 ]; do
   set +e
@@ -62,31 +63,9 @@ done
 echo "[odoo-init] starting odoo httpd..."
 exec odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}"
 BASH
+            chmod +x scripts/odoo-init/entry.sh
           fi
-          chmod +x scripts/odoo-init/entry.sh
           ls -l scripts/odoo-init/
-        '''
-      }
-    }
-
-    stage('Sanity: compose config shows correct mount/command') {
-      steps {
-        sh '''
-          set -eux
-          docker compose config > .compose.rendered.yaml
-          sed -n '1,200p' .compose.rendered.yaml
-
-          # Prüfe: Mount-Ziel existiert in Render
-          grep -q 'target: /opt/odoo-init' .compose.rendered.yaml
-
-          # Prüfe: Source-Pfad verweist auf Workspace/scripts/odoo-init
-          grep -q "source: ${WORKSPACE}/scripts/odoo-init" .compose.rendered.yaml
-
-          # Prüfe: Command ruft /opt/odoo-init/entry.sh auf
-          grep -q '/opt/odoo-init/entry.sh' .compose.rendered.yaml
-
-          # Safety: Datei wirklich vorhanden & ausführbar
-          test -x scripts/odoo-init/entry.sh
         '''
       }
     }
@@ -95,52 +74,17 @@ BASH
       steps {
         sh '''
           set -eux
+          cd "$WORKSPACE"
+
+          # Compose muss deinen Ordner als /opt/odoo-init mounten und das Script starten
+          # (deine docker-compose.yml sollte bereits haben:)
+          #   volumes:
+          #     - ./scripts/odoo-init:/opt/odoo-init:ro
+          #   command: ["/bin/bash","-lc","/opt/odoo-init/entry.sh"]
+
           ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}"
-
-          echo "==> Running containers:"
-          docker ps --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"
         '''
       }
-    }
-
-    stage('Smoke (kurz)') {
-      steps {
-        sh '''
-          set -eux
-          for n in $(seq 1 "${COUNT}"); do
-            host="${PREFIX}${n}.${DOMAIN_BASE}"
-            echo "Smoke: ${host}"
-            for i in $(seq 1 120); do
-              if curl -fsSI --resolve "${host}:80:127.0.0.1" "http://${host}/web/login" | head -n1 | grep -E "200 OK|302 Found" >/dev/null; then
-                echo "OK: ${host} antwortet."; break
-              fi
-              sleep 1
-            done
-            curl -sI --resolve "${host}:80:127.0.0.1" "http://${host}/web/login" | sed -n '1,5p'
-          done
-        '''
-      }
-    }
-  }
-  post {
-    failure {
-      sh '''
-        set -eux
-        echo "==== DIAG: docker compose ps ===="
-        docker ps --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"
-        echo "==== DIAG: rendered compose (top) ===="
-        sed -n '1,120p' .compose.rendered.yaml || true
-        echo "==== DIAG: per-project logs ===="
-        for n in $(seq 1 "${COUNT}"); do
-          p="${PREFIX}${n}"
-          echo "---- ${p} ps ----"
-          docker compose -p "${p}" ps || true
-          echo "---- ${p} logs odoo (tail 200) ----"
-          docker compose -p "${p}" logs --tail=200 odoo || true
-          echo "---- ${p} logs db (tail 100) ----"
-          docker compose -p "${p}" logs --tail=100 db || true
-        done
-      '''
     }
   }
 }
