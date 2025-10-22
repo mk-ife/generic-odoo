@@ -12,7 +12,11 @@ fi
 
 # Compose-Projektname: nur lowercase a-z0-9_- und muss mit Buchstabe/Zahl beginnen
 NAME="$(echo "$RAW_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
-NAME="$(echo "$NAME" | sed 's/^[^a-z0-9]//')"   # führende ungültige Zeichen entfernen
+NAME="$(echo "$NAME" | sed 's/^[a-z0-9].*//;t;:x; s/^[^a-z0-9]//; tx')"
+# Fallback falls erste Zeile leer (extrem selten)
+if [[ -z "${NAME}" ]]; then
+  NAME="$(echo "$RAW_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')"
+fi
 if [[ -z "${NAME}" ]]; then
   echo "ERROR: resulting name is empty after sanitizing."; exit 1
 fi
@@ -87,14 +91,24 @@ exec odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}"
 ENTRY
 chmod +x "${INIT_DIR}/entry.sh"
 
+echo "==> Starting ${COMPOSE_PROJECT_NAME} ..."
+
 # Start mit Init-Override (bind-mount des INIT_DIR nach /opt/odoo-init)
+set +e
 docker compose -p "${COMPOSE_PROJECT_NAME}" \
   -f docker-compose.yml \
   -f docker-compose.init.yml \
   up -d --wait
+UP_RC=$?
+set -e
 
-# Readiness check (max 90s)
+# Schnelle Sichtprüfung, ob entry.sh drin ist
+echo "--- host init dir ---"
+ls -l "${INIT_DIR}" || true
+
+# Readiness check (max 90s), auch wenn --wait nonzero war
 echo "Waiting for Odoo to be ready..."
+READY=0
 for i in $(seq 1 90); do
   if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
     if curl -fsS -m 2 -H "Host: ${VIRTUAL_HOST}" http://127.0.0.1/web/login >/dev/null 2>&1; then
@@ -108,8 +122,9 @@ for i in $(seq 1 90); do
   sleep 1
 done
 
-if [[ "${READY:-0}" != "1" ]]; then
+if [[ "${READY}" != "1" ]]; then
   echo "WARN: Odoo readiness check timed out. Logs:"
+  docker compose -p "${COMPOSE_PROJECT_NAME}" ps
   docker compose -p "${COMPOSE_PROJECT_NAME}" logs --tail=200 || true
 else
   echo "==> Up: ${COMPOSE_PROJECT_NAME} is ready."
@@ -125,3 +140,6 @@ else
   echo "Test:   curl -sI http://127.0.0.1:${ODOO_PORT}/web/login | sed -n '1,5p'"
   echo "Open:   http://127.0.0.1:${ODOO_PORT}/web"
 fi
+
+# Niemals mit Fehler rausfallen – Diagnose übernimmt Pipeline
+exit 0

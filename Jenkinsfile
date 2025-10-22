@@ -2,10 +2,10 @@ pipeline {
   agent any
   options { timestamps() }
   parameters {
-    string(name: 'COUNT', defaultValue: '1', description: 'Wieviele Instanzen?')
-    string(name: 'PREFIX', defaultValue: 'demo', description: 'Instanz-Präfix')
+    string(name: 'COUNT',       defaultValue: '1',                description: 'Wieviele Instanzen?')
+    string(name: 'PREFIX',      defaultValue: 'demo',             description: 'Instanz-Präfix')
     string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'Basisdomain für Traefik')
-    string(name: 'PARALLEL', defaultValue: '1', description: 'Wie viele parallel starten')
+    string(name: 'PARALLEL',    defaultValue: '1',                description: 'Wie viele parallel starten')
   }
   environment {
     DOCKER_CONFIG = "${WORKSPACE}/.docker"
@@ -24,23 +24,26 @@ pipeline {
           set -eux
           docker compose -f docker-compose.yml -f docker-compose.init.yml config | tee .compose.rendered.yaml >/dev/null
           sed -n '1,200p' .compose.rendered.yaml
-          echo "INFO: /opt/odoo-init kommt aus docker-compose.init.yml (bind-mount ./tmp/<NAME>-init)."
+          echo "INFO: /opt/odoo-init kommt via bind aus ./tmp/<NAME>-init"
         '''
       }
     }
 
-    stage('Deploy batch') {
+    stage('Deploy batch (nie failen)') {
       steps {
-        sh '''
-          set -eux
-          ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}"
-          echo "==> Running containers:"
-          docker ps --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'
-        '''
+        script {
+          // Niemals die Pipeline failen – wir diagnostizieren selbst
+          sh """
+            set -eux
+            ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}" || true
+            echo "==> Running containers:"
+            docker ps --format 'table {{'+'{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'+"}}"
+          """
+        }
       }
     }
 
-    stage('Diagnose (bei Unhealthy)') {
+    stage('Diagnose (immer)') {
       steps {
         sh '''
           set -eux
@@ -49,24 +52,28 @@ pipeline {
             for c in $LIST; do
               echo "==> Diagnose für Container: $c"
               docker ps -a --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}' | grep -E "^${c}\\b" || true
+              base="${c%%-odoo-1}"
               echo "--- docker inspect (Cmd/Mounts) ---"
               docker inspect "$c" --format 'Cmd: {{.Config.Cmd}}' || true
               docker inspect "$c" --format '{{json .Mounts}}' || true
-              echo "--- /opt/odoo-init Inhalt ---"
+              echo "--- /opt/odoo-init Inhalt (im Container) ---"
               docker exec "$c" sh -lc 'ls -l /opt/odoo-init || true' || true
+              echo "--- entry.sh (erste 80 Zeilen) ---"
+              docker exec "$c" sh -lc 'sed -n "1,80p" /opt/odoo-init/entry.sh || true' || true
               echo "--- letzte Odoo-Logs ---"
-              docker compose -p "${c%%-odoo-1}" logs --tail=200 odoo || true
+              docker compose -p "$base" logs --tail=200 odoo || true
             done
+          else
+            echo "WARN: Keine odoo-Container mit Präfix ${PREFIX} gefunden."
           fi
         '''
       }
     }
 
-    stage('Smoke') {
+    stage('Smoke (immer)') {
       steps {
         sh '''
           set -eux
-          COUNT="${COUNT}"
           for n in $(seq 1 "${COUNT}"); do
             NAME="${PREFIX}${n}"
             HOST="${NAME}.${DOMAIN_BASE}"

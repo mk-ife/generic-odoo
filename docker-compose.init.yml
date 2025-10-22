@@ -1,5 +1,4 @@
 services:
   odoo:
     volumes:
-      # bind mount auf per-Instanz-Ordner (wird in instance-up.sh erzeugt)
       - ./tmp/${COMPOSE_PROJECT_NAME}-init:/opt/odoo-init:ro
