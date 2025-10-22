@@ -44,9 +44,8 @@ services:
       retries: 40
     volumes:
       - odoo_data:/var/lib/odoo
-      # falls du ein Init-Skript nutzt, hier mounten:
-      # - ./scripts/odoo-init/entry.sh:/usr/local/bin/odoo-init.sh:ro
-      # command: ["/usr/local/bin/odoo-init.sh"]
+      - ${ODOO_INIT_SRC:-./scripts/odoo-init}:/opt/odoo-init:ro
+    command: ["/bin/bash","-lc","/opt/odoo-init/entry.sh"]
     networks:
       - default
       - proxy

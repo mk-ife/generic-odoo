@@ -1,40 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DB_HOST="${DB_HOST:-db}"
-DB_PORT="${DB_PORT:-5432}"
-DB_USER="${DB_USER:-odoo}"
-DB_PASSWORD="${DB_PASSWORD:-password}"
-DESIRED_DB="${DESIRED_DB:-${POSTGRES_DB:-${COMPOSE_PROJECT_NAME:-odoo}_db}}"
+echo "[entry] starting init for Odoo ${ODOO_VERSION:-18.0}"
+echo "[entry] DB_HOST=${DB_HOST:-db} DB_PORT=${DB_PORT:-5432} DB_USER=${DB_USER:-odoo} DESIRED_DB=${DESIRED_DB:-${COMPOSE_PROJECT_NAME}_db}"
 
-ODOO_DB_ARGS=(--db_host "${DB_HOST}" --db_port "${DB_PORT}" --db_user "${DB_USER}" --db_password "${DB_PASSWORD}")
-
-echo "[odoo-init] DB=${DESIRED_DB} on ${DB_HOST}:${DB_PORT} (user=${DB_USER})"
-
-# Warten bis Postgres TCP offen ist
-for i in {1..180}; do
-  if bash -lc "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null; then
-    echo "[odoo-init] postgres reachable"
-    break
-  fi
-  sleep 1
+# wait for postgres
+until PGPASSWORD="${DB_PASSWORD:-password}" psql -h "${DB_HOST:-db}" -U "${DB_USER:-odoo}" -p "${DB_PORT:-5432}" -d postgres -c "select 1" >/dev/null 2>&1; do
+  echo "[entry] waiting for postgres ${DB_HOST:-db}:${DB_PORT:-5432} ..."
+  sleep 2
 done
+echo "[entry] postgres is reachable"
 
-# Idempotent initialisieren
-tries=0
-until [ $tries -ge 5 ]; do
-  set +e
-  echo "[odoo-init] init attempt $((tries+1))/5: odoo -d ${DESIRED_DB} -i base --stop-after-init ${ODOO_DB_ARGS[*]}"
-  odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}" -i base --stop-after-init
-  rc=$?
-  set -e
-  if [ $rc -eq 0 ]; then
-    echo "[odoo-init] base installed (or already up-to-date)"
-    break
+DB_NAME="${DESIRED_DB:-${COMPOSE_PROJECT_NAME}_db}"
+export PGHOST="${DB_HOST:-db}"
+export PGPORT="${DB_PORT:-5432}"
+export PGUSER="${DB_USER:-odoo}"
+export PGPASSWORD="${DB_PASSWORD:-password}"
+
+# create db if missing
+if ! psql -d postgres -Atqc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
+  echo "[entry] creating database ${DB_NAME}"
+  createdb "${DB_NAME}"
+  # base install once, then exit; if it fails, print logs and exit non-zero
+  echo "[entry] installing base in ${DB_NAME}"
+  if ! odoo -d "${DB_NAME}" -i base --without-demo=all --stop-after-init; then
+    echo "[entry] base install failed — last 200 lines of log:"
+    tail -n 200 /var/lib/odoo/.local/share/Odoo/log/* 2>/dev/null || true
+    exit 1
   fi
-  tries=$((tries+1))
-  sleep 5
-done
+else
+  echo "[entry] database ${DB_NAME} already exists — skipping base install"
+fi
 
-echo "[odoo-init] starting odoo httpd..."
-exec odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}"
+echo "[entry] launching odoo server on 8069"
+exec odoo -d "${DB_NAME}"
