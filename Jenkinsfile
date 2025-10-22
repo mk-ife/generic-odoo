@@ -8,10 +8,10 @@ pipeline {
   }
 
   parameters {
-    string(name: 'COUNT',       defaultValue: '1',    description: 'Wie viele Instanzen starten')
-    string(name: 'PREFIX',      defaultValue: 'demo', description: 'Instanz-Prefix, z.B. "kunde-a-"')
-    string(name: 'DOMAIN_BASE', defaultValue: '',     description: 'leer = ohne Traefik; sonst Traefik-Domain-Basis')
-    string(name: 'PARALLEL',    defaultValue: '1',    description: 'Parallel gestartete Jobs')
+    string(name: 'COUNT',       defaultValue: '1',                    description: 'Wie viele Instanzen starten')
+    string(name: 'PREFIX',      defaultValue: 'demo',                 description: 'Instanz-Prefix, z.B. "kunde-a-"')
+    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'leer = ohne Traefik; sonst Traefik-Domain-Basis')
+    string(name: 'PARALLEL',    defaultValue: '1',                    description: 'Parallel gestartete Jobs')
   }
 
   environment {
@@ -27,7 +27,7 @@ pipeline {
       steps {
         checkout scm
         sh '''
-          set -eux
+          set -ex
           # compose v2 CLI verfügbar machen
           mkdir -p "$DOCKER_CONFIG/cli-plugins"
           if [ ! -x "$COMPOSE_CLI" ]; then
@@ -46,7 +46,7 @@ pipeline {
     stage('Up (batch)') {
       steps {
         sh '''
-          set -eux
+          set -ex
           COUNT="${COUNT}"
           PREFIX="${PREFIX}"
           DOMAIN_BASE="${DOMAIN_BASE}"
@@ -61,7 +61,7 @@ pipeline {
     stage('Smoke tests') {
       steps {
         sh '''
-          set -eux
+          set -ex
           COUNT="${COUNT}"
           PREFIX="${PREFIX}"
           DOMAIN_BASE="${DOMAIN_BASE}"
@@ -70,7 +70,7 @@ pipeline {
             NAME="${PREFIX}${i}"
             echo "== Smoke: ${NAME}"
 
-            if [[ -n "${DOMAIN_BASE}" ]]; then
+            if [ -n "${DOMAIN_BASE}" ]; then
               HOST="${NAME}.${DOMAIN_BASE}"
               echo "Smoke via Traefik: http://${HOST}/web/login"
               curl -sI --resolve "${HOST}:80:127.0.0.1" "http://${HOST}/web/login" | sed -n '1,8p'
@@ -89,7 +89,7 @@ pipeline {
     stage('Collect logs') {
       steps {
         sh '''
-          set -eux
+          set -ex
           COUNT="${COUNT}"
           PREFIX="${PREFIX}"
 
