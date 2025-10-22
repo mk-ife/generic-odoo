@@ -38,7 +38,8 @@ services:
     volumes:
       - odoo_data:/var/lib/odoo
       - ./addons:/mnt/extra-addons:ro
-      - odoo_init:/opt/odoo-init:ro
+      # >>> WICHTIG: Bind-Mount direkt aus Repo (überschreibbar per ODOO_INIT_SRC)
+      - ${ODOO_INIT_SRC:-./scripts/odoo-init}:/opt/odoo-init:ro
     labels:
       - "traefik.enable=${TRAEFIK_ENABLE:-false}"
       - "traefik.docker.network=proxy"
@@ -53,8 +54,6 @@ volumes:
     name: "odoo_${COMPOSE_PROJECT_NAME}_data"
   pg_data:
     name: "pg_${COMPOSE_PROJECT_NAME}_data"
-  odoo_init:
-    name: "${COMPOSE_PROJECT_NAME}_odoo_init"
 
 networks:
   default:
