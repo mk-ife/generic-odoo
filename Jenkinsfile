@@ -14,23 +14,31 @@ pipeline {
     string(name: 'PARALLEL',    defaultValue: '1',    description: 'Parallel gestartete Jobs')
   }
 
+  environment {
+    // docker compose CLI ins Workspace installieren (falls auf Agent nicht vorhanden)
+    DOCKER_CONFIG = "${WORKSPACE}/.docker"
+    COMPOSE_CLI   = "${WORKSPACE}/.docker/cli-plugins/docker-compose"
+    // Quelle für /opt/odoo-init Bind-Mount
+    ODOO_INIT_SRC = "${WORKSPACE}/scripts/odoo-init"
+  }
+
   stages {
     stage('Checkout') {
       steps {
         checkout scm
-        sh 'git rev-parse --short HEAD'
-      }
-    }
-
-    stage('Prep init assets') {
-      steps {
         sh '''
-          set -euxo pipefail
-          # sicherstellen, dass das init-script vorhanden & ausführbar ist
-          test -f scripts/odoo-init/entry.sh && chmod +x scripts/odoo-init/entry.sh || true
-          test -f scripts/instance-up.sh    && chmod +x scripts/instance-up.sh    || true
-          test -f scripts/instance-down.sh  && chmod +x scripts/instance-down.sh  || true
-          test -f scripts/instances-batch.sh && chmod +x scripts/instances-batch.sh || true
+          set -eux
+          # compose v2 CLI verfügbar machen
+          mkdir -p "$DOCKER_CONFIG/cli-plugins"
+          if [ ! -x "$COMPOSE_CLI" ]; then
+            curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 -o "$COMPOSE_CLI"
+            chmod +x "$COMPOSE_CLI"
+          fi
+          docker compose version
+
+          # Init-Skript muss existieren und ausführbar sein
+          test -s "${ODOO_INIT_SRC}/entry.sh" || { echo "FEHLT: ${ODOO_INIT_SRC}/entry.sh"; exit 1; }
+          chmod +x "${ODOO_INIT_SRC}/entry.sh"
         '''
       }
     }
@@ -38,7 +46,7 @@ pipeline {
     stage('Up (batch)') {
       steps {
         sh '''
-          set -euxo pipefail
+          set -eux
           COUNT="${COUNT}"
           PREFIX="${PREFIX}"
           DOMAIN_BASE="${DOMAIN_BASE}"
@@ -53,7 +61,7 @@ pipeline {
     stage('Smoke tests') {
       steps {
         sh '''
-          set -euxo pipefail
+          set -eux
           COUNT="${COUNT}"
           PREFIX="${PREFIX}"
           DOMAIN_BASE="${DOMAIN_BASE}"
@@ -81,7 +89,7 @@ pipeline {
     stage('Collect logs') {
       steps {
         sh '''
-          set -euxo pipefail
+          set -eux
           COUNT="${COUNT}"
           PREFIX="${PREFIX}"
 
