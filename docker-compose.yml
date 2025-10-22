@@ -12,7 +12,7 @@ services:
       timeout: 3s
       retries: 30
     volumes:
-      - pg_${COMPOSE_PROJECT_NAME}_data:/var/lib/postgresql/data
+      - pg_data:/var/lib/postgresql/data
     networks:
       - default
 
@@ -28,10 +28,8 @@ services:
       DB_USER: ${POSTGRES_USER:-odoo}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
       DESIRED_DB: ${POSTGRES_DB:-${COMPOSE_PROJECT_NAME}_db}
-    # Host-Port wird in Jenkins/Script eindeutig berechnet (z. B. 8069 + BUILD_NUMBER)
     ports:
       - "${ODOO_PORT:-8069}:8069"
-    # Traefik-Labels optional: Traefik selbst bleibt außerhalb des Repos (externes Netz!)
     labels:
       - "traefik.enable=${TRAEFIK_ENABLE:-false}"
       - "traefik.docker.network=proxy"
@@ -45,17 +43,17 @@ services:
       timeout: 2s
       retries: 40
     volumes:
-      - odoo_${COMPOSE_PROJECT_NAME}_data:/var/lib/odoo
-      # Falls du ein Initscript nutzt:
-      # - ./scripts/odoo-init.sh:/usr/local/bin/odoo-init.sh:ro
+      - odoo_data:/var/lib/odoo
+      # falls du ein Init-Skript nutzt, hier mounten:
+      # - ./scripts/odoo-init/entry.sh:/usr/local/bin/odoo-init.sh:ro
       # command: ["/usr/local/bin/odoo-init.sh"]
     networks:
       - default
       - proxy
 
 volumes:
-  odoo_${COMPOSE_PROJECT_NAME}_data: {}
-  pg_${COMPOSE_PROJECT_NAME}_data: {}
+  odoo_data: {}
+  pg_data: {}
 
 networks:
   default:
