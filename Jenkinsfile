@@ -1,111 +1,145 @@
 pipeline {
   agent any
-  options { timestamps() }
+
+  options {
+    skipDefaultCheckout(true)
+    timestamps()
+    timeout(time: 30, unit: 'MINUTES')
+  }
+
   parameters {
-    string(name: 'COUNT', defaultValue: '1', description: 'Wieviele Instanzen?')
-    string(name: 'PREFIX', defaultValue: 'demo', description: 'Instanz-Präfix (pro Kunde anpassbar)')
-    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'Basisdomain für Traefik')
-    string(name: 'PARALLEL', defaultValue: '1', description: 'Wie viele parallel starten')
+    string(name: 'COUNT',       defaultValue: '1',                     description: 'Wie viele Instanzen starten')
+    string(name: 'PREFIX',      defaultValue: 'demo',                  description: 'Instanz-Prefix, z.B. "kunde-a-"')
+    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'leer = ohne Traefik; sonst Traefik-Domain-Basis')
+    string(name: 'PARALLEL',    defaultValue: '1',                     description: 'Parallel gestartete Jobs')
   }
+
   environment {
+    // docker compose CLI ins Workspace installieren (falls auf Agent nicht vorhanden)
     DOCKER_CONFIG = "${WORKSPACE}/.docker"
+    COMPOSE_CLI   = "${WORKSPACE}/.docker/cli-plugins/docker-compose"
+    // WICHTIG: relativer Pfad (sichtbar für Docker-Daemon beim Bind-Mount)
+    ODOO_INIT_SRC = "./scripts/odoo-init"
   }
+
   stages {
     stage('Checkout') {
       steps {
         checkout scm
-        sh 'git rev-parse --short HEAD'
-      }
-    }
-
-    stage('Sanity: compose render (WARN wenn bind auf /opt/odoo-init)') {
-      steps {
         sh '''
-          set -eux
-          docker compose config | tee .compose.rendered.yaml >/dev/null
-          sed -n '1,200p' .compose.rendered.yaml
-          if grep -q "target: /opt/odoo-init" .compose.rendered.yaml && grep -q "\\- type: bind\\s*$" -n .compose.rendered.yaml; then
-            echo "WARN: /opt/odoo-init ist als bind gemountet. Bitte Override fixen!"
-          else
-            echo "OK: /opt/odoo-init ist kein bind."
+          set -ex
+          # compose v2 CLI verfügbar machen
+          mkdir -p "$DOCKER_CONFIG/cli-plugins"
+          if [ ! -x "$COMPOSE_CLI" ]; then
+            curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 -o "$COMPOSE_CLI"
+            chmod +x "$COMPOSE_CLI"
           fi
+          docker compose version
+
+          # Init-Skript muss existieren und ausführbar sein
+          test -s "${ODOO_INIT_SRC}/entry.sh" || { echo "FEHLT: ${ODOO_INIT_SRC}/entry.sh"; exit 1; }
+          chmod +x "${ODOO_INIT_SRC}/entry.sh"
         '''
       }
     }
 
-    stage('Prep init volumes (copy entry.sh into <NAME>_odoo_init)') {
+    stage('Up (batch)') {
       steps {
         sh '''
-          set -eux
+          set -ex
           COUNT="${COUNT}"
-          for n in $(seq 1 "${COUNT}"); do
-            NAME="${PREFIX}${n}"
-            VOL="${NAME}_odoo_init"
-            echo "==> Preparing volume ${VOL}"
-            docker volume create "${VOL}"
-            # entry.sh aus Repo in das Volume kopieren:
-            docker run --rm \
-              -v "${VOL}:/dst" \
-              -v "$PWD/scripts/odoo-init:/src:ro" \
-              alpine:3 sh -lc '
-                set -e
-                test -s /src/entry.sh
-                rm -rf /dst/* || true
-                cp -r /src/. /dst/
-                chmod 755 /dst/entry.sh
-                ls -l /dst
-              '
-          done
-        '''
-      }
-    }
+          PREFIX="${PREFIX}"
+          DOMAIN_BASE="${DOMAIN_BASE}"
+          PARALLEL="${PARALLEL}"
 
-    stage('Deploy batch') {
-      steps {
-        sh '''
-          set -eux
+          # Startet COUNT Instanzen mit PREFIX[, DOMAIN_BASE] und der gewünschten Parallelität
           ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}"
-          echo "==> Running containers:"
-          docker ps --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'
         '''
       }
     }
 
-    stage('Diagnose (bei Unhealthy)') {
+    stage('Smoke tests') {
       steps {
         sh '''
-          set -eux
-          LIST="$(docker ps -a --format '{{.Names}}' | grep -E "^${PREFIX}[0-9]+-odoo-1$" || true)"
-          if [ -n "${LIST}" ]; then
-            for c in $LIST; do
-              echo "==> Diagnose für Container: $c"
-              docker ps -a --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}' | grep -E "^${c}\\b" || true
-              echo "--- docker inspect (Cmd/Mounts) ---"
-              docker inspect "$c" --format 'Cmd: {{.Config.Cmd}}' || true
-              docker inspect "$c" --format '{{json .Mounts}}' || true
-              echo "--- /opt/odoo-init Inhalt ---"
-              docker exec "$c" sh -lc 'ls -l /opt/odoo-init || true' || true
-              echo "--- letzte Odoo-Logs ---"
-              docker compose -p "${c%%-odoo-1}" logs --tail=200 odoo || true
-            done
-          fi
-        '''
-      }
-    }
-
-    stage('Smoke') {
-      steps {
-        sh '''
-          set -eux
+          set -ex
           COUNT="${COUNT}"
-          for n in $(seq 1 "${COUNT}"); do
-            NAME="${PREFIX}${n}"
-            HOST="${NAME}.${DOMAIN_BASE}"
-            echo "Test: curl -sI --resolve '${HOST}:80:127.0.0.1' http://${HOST}/web/login | sed -n '1,5p'"
-            curl -sI --resolve "${HOST}:80:127.0.0.1" "http://${HOST}/web/login" | sed -n '1,5p' || true
+          PREFIX="${PREFIX}"
+          DOMAIN_BASE="${DOMAIN_BASE}"
+
+          for i in $(seq 1 "${COUNT}"); do
+            NAME="${PREFIX}${i}"
+            echo "== Smoke: ${NAME}"
+
+            if [ -n "${DOMAIN_BASE}" ]; then
+              HOST="${NAME}.${DOMAIN_BASE}"
+              echo "Smoke via Traefik: http://${HOST}/web/login"
+              curl -sI --resolve "${HOST}:80:127.0.0.1" "http://${HOST}/web/login" | sed -n '1,12p'
+            else
+              PORT="$(docker compose -p "${NAME}" port odoo 8069 | sed 's/.*://')"
+              test -n "${PORT}"
+              echo "Smoke direct: http://127.0.0.1:${PORT}/web/login"
+              curl -sI "http://127.0.0.1:${PORT}/web/login" | sed -n '1,12p'
+            fi
           done
         '''
       }
+    }
+
+    stage('Collect logs') {
+      steps {
+        sh '''
+          set -ex
+          COUNT="${COUNT}"
+          PREFIX="${PREFIX}"
+
+          rm -f logs_*.txt || true
+
+          for i in $(seq 1 "${COUNT}"); do
+            NAME="${PREFIX}${i}"
+            docker compose -p "${NAME}" ps > "logs_${NAME}_ps.txt" 2>&1 || true
+            docker compose -p "${NAME}" logs --tail=300 odoo > "logs_${NAME}_odoo.txt" 2>&1 || true
+            docker compose -p "${NAME}" logs --tail=300 db   > "logs_${NAME}_db.txt"   2>&1 || true
+          done
+        '''
+        archiveArtifacts artifacts: 'logs_*.txt', fingerprint: true, onlyIfSuccessful: false
+      }
+    }
+  }
+
+  post {
+    // Dieser Block läuft IMMER – auch bei Fehlern, und ZUERST sammeln wir Logs, DANN räumen wir auf.
+    always {
+      // 1) Logs vor Cleanup einsammeln (auch wenn Stages geskippt wurden)
+      sh '''
+        set +e
+        COUNT="${COUNT}"
+        PREFIX="${PREFIX}"
+
+        rm -f post_logs_*.txt || true
+
+        for i in $(seq 1 "${COUNT}"); do
+          NAME="${PREFIX}${i}"
+          # ps + komplette Logs + gezielt odoo/db
+          docker compose -p "${NAME}" ps > "post_logs_${NAME}_ps.txt" 2>&1 || true
+          docker compose -p "${NAME}" logs --no-color > "post_logs_${NAME}_all.txt" 2>&1 || true
+          docker compose -p "${NAME}" logs --tail=500 odoo > "post_logs_${NAME}_odoo.txt" 2>&1 || true
+          docker compose -p "${NAME}" logs --tail=500 db   > "post_logs_${NAME}_db.txt"   2>&1 || true
+        done
+      '''
+      archiveArtifacts artifacts: 'post_logs_*.txt', fingerprint: true, onlyIfSuccessful: false
+
+      // 2) Danach sauberer Cleanup (Container + Volumes)
+      sh '''
+        set +e
+        COUNT="${COUNT}"
+        PREFIX="${PREFIX}"
+
+        for i in $(seq 1 "${COUNT}"); do
+          NAME="${PREFIX}${i}"
+          echo "== Cleanup: ${NAME}"
+          ./scripts/instance-down.sh "${NAME}" || true
+        done
+      '''
     }
   }
 }
