@@ -7,18 +7,18 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
       POSTGRES_DB: ${POSTGRES_DB:-${COMPOSE_PROJECT_NAME}_db}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-odoo} -d ${POSTGRES_DB:-${COMPOSE_PROJECT_NAME}_db} -h 127.0.0.1"]
       interval: 5s
       timeout: 3s
-      retries: 30
+      retries: 60
     volumes:
       - pg_data:/var/lib/postgresql/data
-    networks:
-      - default
+    networks: [default]
 
   odoo:
     image: odoo:18.0
-    container_name: "odoo_${COMPOSE_PROJECT_NAME}"
+    restart: unless-stopped
+    init: true
     depends_on:
       db:
         condition: service_healthy
@@ -28,34 +28,34 @@ services:
       DB_USER: ${POSTGRES_USER:-odoo}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
       DESIRED_DB: ${POSTGRES_DB:-${COMPOSE_PROJECT_NAME}_db}
-    ports:
-      - "${ODOO_PORT:-8069}:8069"
+    command: ["/bin/bash","-lc","/opt/odoo-init/entry.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/8069'"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 240s
+    volumes:
+      - odoo_data:/var/lib/odoo
+      - ./addons:/mnt/extra-addons:ro
+      - odoo_init:/opt/odoo-init:ro
     labels:
       - "traefik.enable=${TRAEFIK_ENABLE:-false}"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.rule=Host(`${VIRTUAL_HOST:-localhost}`)"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.entrypoints=${TRAEFIK_ENTRYPOINTS:-websecure}"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls.certresolver=${ACME_RESOLVER:-le}"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.rule=Host(`${VIRTUAL_HOST:-}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.service=${COMPOSE_PROJECT_NAME}"
       - "traefik.http.services.${COMPOSE_PROJECT_NAME}.loadbalancer.server.port=8069"
-    healthcheck:
-      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/8069'"]
-      interval: 5s
-      timeout: 2s
-      retries: 40
-    volumes:
-      - odoo_data:/var/lib/odoo
-      - ${ODOO_INIT_SRC:-./scripts/odoo-init}:/opt/odoo-init:ro
-    command: ["/bin/bash","-lc","/opt/odoo-init/entry.sh"]
-    networks:
-      - default
-      - proxy
+    networks: [default, proxy]
 
 volumes:
+  # Ohne feste Namen -> pro Projekt (-p <NAME>) entstehen eigene Volumes: <NAME>_odoo_data, <NAME>_pg_data, <NAME>_odoo_init
   odoo_data: {}
   pg_data: {}
+  odoo_init: {}
 
 networks:
-  default:
-    driver: bridge
+  default: {}
   proxy:
     external: true
+    name: proxy
