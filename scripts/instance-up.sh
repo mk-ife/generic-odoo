@@ -2,16 +2,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RAW_NAME="${1:-}"     # z.B. demo1
+RAW_NAME="${1:-}"     # z.B. DemoA
 PORT="${2:-}"         # optional (nur ohne Traefik)
-HOST="${3:-}"         # optional (Traefik Host, z.B. demo1.91-107-228-241.nip.io)
+HOST="${3:-}"         # optional (Traefik Host, z.B. demo1.example.tld)
 
 if [[ -z "${RAW_NAME}" ]]; then
   echo "Usage: scripts/instance-up.sh <NAME> [PORT] [VIRTUAL_HOST]"; exit 1
 fi
 
+# Compose-Projektname: nur lowercase a-z0-9_- und muss mit Buchstabe/Zahl beginnen
 NAME="$(echo "$RAW_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
-NAME="$(echo "$NAME" | sed 's/^[^a-z0-9]//')"
+NAME="$(echo "$NAME" | sed 's/^[^a-z0-9]//')"   # führende ungültige Zeichen entfernen
 if [[ -z "${NAME}" ]]; then
   echo "ERROR: resulting name is empty after sanitizing."; exit 1
 fi
@@ -39,14 +40,64 @@ if [[ "${TRAEFIK_ENABLE}" != "true" ]]; then
   export ODOO_PORT="${PORT}"
 fi
 
-# Start
-docker compose -p "${COMPOSE_PROJECT_NAME}" up -d --wait
+# --- Inline-Init vorbereiten: pro Instanz einen Ordner mit entry.sh bauen ---
+INIT_DIR="./tmp/${COMPOSE_PROJECT_NAME}-init"
+mkdir -p "${INIT_DIR}"
+cat > "${INIT_DIR}/entry.sh" <<'ENTRY'
+#!/usr/bin/env bash
+set -euo pipefail
+
+DB_HOST="${DB_HOST:-db}"
+DB_PORT="${DB_PORT:-5432}"
+DB_USER="${DB_USER:-odoo}"
+DB_PASSWORD="${DB_PASSWORD:-password}"
+DESIRED_DB="${DESIRED_DB:-${POSTGRES_DB:-${COMPOSE_PROJECT_NAME:-odoo}_db}}"
+
+ODOO_DB_ARGS=(--db_host "${DB_HOST}" --db_port "${DB_PORT}" --db_user "${DB_USER}" --db_password "${DB_PASSWORD}")
+
+echo "[odoo-init] DB=${DESIRED_DB} on ${DB_HOST}:${DB_PORT} (user=${DB_USER})"
+
+# Warten bis Postgres TCP offen ist
+for i in {1..180}; do
+  if bash -lc "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null; then
+    echo "[odoo-init] postgres reachable"
+    break
+  fi
+  sleep 1
+done
+
+# Idempotente Grundinstallation
+tries=0
+until [ $tries -ge 5 ]; do
+  set +e
+  echo "[odoo-init] init attempt $((tries+1))/5: odoo -d ${DESIRED_DB} -i base --stop-after-init ${ODOO_DB_ARGS[*]}"
+  odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}" -i base --stop-after-init
+  rc=$?
+  set -e
+  if [ $rc -eq 0 ]; then
+    echo "[odoo-init] base installed (or already up-to-date)"
+    break
+  fi
+  tries=$((tries+1))
+  sleep 5
+done
+
+echo "[odoo-init] starting odoo httpd..."
+exec odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}"
+ENTRY
+chmod +x "${INIT_DIR}/entry.sh"
+
+# Start mit Init-Override (bind-mount des INIT_DIR nach /opt/odoo-init)
+docker compose -p "${COMPOSE_PROJECT_NAME}" \
+  -f docker-compose.yml \
+  -f docker-compose.init.yml \
+  up -d --wait
 
 # Readiness check (max 90s)
 echo "Waiting for Odoo to be ready..."
 for i in $(seq 1 90); do
   if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
-    if curl -fsS -m 2 --resolve "${VIRTUAL_HOST}:80:127.0.0.1" "http://${VIRTUAL_HOST}/web/login" >/dev/null 2>&1; then
+    if curl -fsS -m 2 -H "Host: ${VIRTUAL_HOST}" http://127.0.0.1/web/login >/dev/null 2>&1; then
       READY=1; break
     fi
   else
@@ -58,21 +109,19 @@ for i in $(seq 1 90); do
 done
 
 if [[ "${READY:-0}" != "1" ]]; then
-  echo "WARN: Odoo readiness check timed out. Diagnostics:"
-  docker compose -p "${COMPOSE_PROJECT_NAME}" ps
-  echo "---- odoo logs (last 200 lines) ----"
-  docker compose -p "${COMPOSE_PROJECT_NAME}" logs --tail=200 odoo || true
-  echo "---- db logs (last 100 lines) ----"
-  docker compose -p "${COMPOSE_PROJECT_NAME}" logs --tail=100 db || true
+  echo "WARN: Odoo readiness check timed out. Logs:"
+  docker compose -p "${COMPOSE_PROJECT_NAME}" logs --tail=200 || true
 else
   echo "==> Up: ${COMPOSE_PROJECT_NAME} is ready."
-  if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
-    echo "Test:   curl -sI --resolve '${VIRTUAL_HOST}:80:127.0.0.1' http://${VIRTUAL_HOST}/web/login | sed -n '1,5p'"
-    echo "Open:   http://${VIRTUAL_HOST}/web"
-    echo "Note:   Request via Traefik (:80) – deshalb '--resolve …:80:127.0.0.1'."
-  else
-    echo "Port:   ${ODOO_PORT}"
-    echo "Test:   curl -sI http://127.0.0.1:${ODOO_PORT}/web/login | sed -n '1,5p'"
-    echo "Open:   http://127.0.0.1:${ODOO_PORT}/web"
-  fi
+fi
+
+# Hints
+if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
+  echo "Test:   curl -sI --resolve '${VIRTUAL_HOST}:80:127.0.0.1' http://${VIRTUAL_HOST}/web/login | sed -n '1,5p'"
+  echo "Open:   http://${VIRTUAL_HOST}/web"
+  echo "Note:   Request via Traefik (:80) – deshalb '--resolve …:80:127.0.0.1'."
+else
+  echo "Port:   ${ODOO_PORT}"
+  echo "Test:   curl -sI http://127.0.0.1:${ODOO_PORT}/web/login | sed -n '1,5p'"
+  echo "Open:   http://127.0.0.1:${ODOO_PORT}/web"
 fi
