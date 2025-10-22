@@ -1,7 +1,8 @@
 services:
   odoo:
     volumes:
-      - ${COMPOSE_PROJECT_NAME}_odoo_init:/opt/odoo-init:ro
+      - odoo_init:/opt/odoo-init:ro
 
 volumes:
-  ${COMPOSE_PROJECT_NAME}_odoo_init:
+  odoo_init:
+    name: "${COMPOSE_PROJECT_NAME}_odoo_init"
