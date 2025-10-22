@@ -18,8 +18,8 @@ pipeline {
     // docker compose CLI ins Workspace installieren (falls auf Agent nicht vorhanden)
     DOCKER_CONFIG = "${WORKSPACE}/.docker"
     COMPOSE_CLI   = "${WORKSPACE}/.docker/cli-plugins/docker-compose"
-    // Quelle für /opt/odoo-init Bind-Mount
-    ODOO_INIT_SRC = "${WORKSPACE}/scripts/odoo-init"
+    // WICHTIG: relativer Pfad statt absolutem WORKSPACE-Pfad (sichtbar für Docker-Daemon)
+    ODOO_INIT_SRC = "./scripts/odoo-init"
   }
 
   stages {
@@ -28,7 +28,6 @@ pipeline {
         checkout scm
         sh '''
           set -ex
-          # compose v2 CLI verfügbar machen
           mkdir -p "$DOCKER_CONFIG/cli-plugins"
           if [ ! -x "$COMPOSE_CLI" ]; then
             curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 -o "$COMPOSE_CLI"
@@ -51,8 +50,6 @@ pipeline {
           PREFIX="${PREFIX}"
           DOMAIN_BASE="${DOMAIN_BASE}"
           PARALLEL="${PARALLEL}"
-
-          # Startet COUNT Instanzen mit PREFIX[, DOMAIN_BASE] und der gewünschten Parallelität
           ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}"
         '''
       }
@@ -69,16 +66,12 @@ pipeline {
           for i in $(seq 1 "${COUNT}"); do
             NAME="${PREFIX}${i}"
             echo "== Smoke: ${NAME}"
-
             if [ -n "${DOMAIN_BASE}" ]; then
               HOST="${NAME}.${DOMAIN_BASE}"
-              echo "Smoke via Traefik: http://${HOST}/web/login"
               curl -sI --resolve "${HOST}:80:127.0.0.1" "http://${HOST}/web/login" | sed -n '1,8p'
             else
-              # ohne Traefik: gemappten Host-Port ermitteln
               PORT="$(docker compose -p "${NAME}" port odoo 8069 | sed 's/.*://')"
               test -n "${PORT}"
-              echo "Smoke direct: http://127.0.0.1:${PORT}/web/login"
               curl -sI "http://127.0.0.1:${PORT}/web/login" | sed -n '1,8p'
             fi
           done
@@ -92,9 +85,7 @@ pipeline {
           set -ex
           COUNT="${COUNT}"
           PREFIX="${PREFIX}"
-
           rm -f logs_*.txt || true
-
           for i in $(seq 1 "${COUNT}"); do
             NAME="${PREFIX}${i}"
             docker compose -p "${NAME}" ps > "logs_${NAME}_ps.txt" || true
@@ -113,7 +104,6 @@ pipeline {
         set +e
         COUNT="${COUNT}"
         PREFIX="${PREFIX}"
-
         for i in $(seq 1 "${COUNT}"); do
           NAME="${PREFIX}${i}"
           echo "== Cleanup: ${NAME}"
