@@ -1,4 +1,7 @@
 services:
   odoo:
     volumes:
-      - ./tmp/${COMPOSE_PROJECT_NAME}-init:/opt/odoo-init:ro
+      - ${COMPOSE_PROJECT_NAME}_odoo_init:/opt/odoo-init:ro
+
+volumes:
+  ${COMPOSE_PROJECT_NAME}_odoo_init:

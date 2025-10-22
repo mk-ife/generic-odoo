@@ -7,42 +7,31 @@ pipeline {
     string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'Basisdomain für Traefik')
     string(name: 'PARALLEL',    defaultValue: '1',                description: 'Wie viele parallel starten')
   }
-  environment {
-    DOCKER_CONFIG = "${WORKSPACE}/.docker"
-  }
+  environment { DOCKER_CONFIG = "${WORKSPACE}/.docker" }
   stages {
     stage('Checkout') {
-      steps {
-        checkout scm
-        sh 'git rev-parse --short HEAD'
-      }
+      steps { checkout scm }
     }
-
     stage('Sanity (compose render, nur Info)') {
       steps {
         sh '''
           set -eux
           docker compose -f docker-compose.yml -f docker-compose.init.yml config | tee .compose.rendered.yaml >/dev/null
           sed -n '1,200p' .compose.rendered.yaml
-          echo "INFO: /opt/odoo-init kommt via bind aus ./tmp/<NAME>-init"
+          echo "INFO: /opt/odoo-init kommt über named volume <NAME>_odoo_init"
         '''
       }
     }
-
     stage('Deploy batch (nie failen)') {
       steps {
-        script {
-          // Niemals die Pipeline failen – wir diagnostizieren selbst
-          sh """
-            set -eux
-            ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}" || true
-            echo "==> Running containers:"
-            docker ps --format 'table {{'+'{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'+"}}"
-          """
-        }
+        sh '''
+          set -eux
+          ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}" || true
+          echo "==> Running containers:"
+          docker ps --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'
+        '''
       }
     }
-
     stage('Diagnose (immer)') {
       steps {
         sh '''
@@ -51,8 +40,8 @@ pipeline {
           if [ -n "${LIST}" ]; then
             for c in $LIST; do
               echo "==> Diagnose für Container: $c"
-              docker ps -a --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}' | grep -E "^${c}\\b" || true
               base="${c%%-odoo-1}"
+              docker ps -a --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}' | grep -E "^${c}\\b" || true
               echo "--- docker inspect (Cmd/Mounts) ---"
               docker inspect "$c" --format 'Cmd: {{.Config.Cmd}}' || true
               docker inspect "$c" --format '{{json .Mounts}}' || true
@@ -69,7 +58,6 @@ pipeline {
         '''
       }
     }
-
     stage('Smoke (immer)') {
       steps {
         sh '''

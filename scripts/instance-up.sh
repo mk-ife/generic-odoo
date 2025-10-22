@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RAW_NAME="${1:-}"     # z.B. DemoA
+RAW_NAME="${1:-}"     # z.B. demo1
 PORT="${2:-}"         # optional (nur ohne Traefik)
 HOST="${3:-}"         # optional (Traefik Host, z.B. demo1.example.tld)
 
@@ -10,13 +10,9 @@ if [[ -z "${RAW_NAME}" ]]; then
   echo "Usage: scripts/instance-up.sh <NAME> [PORT] [VIRTUAL_HOST]"; exit 1
 fi
 
-# Compose-Projektname: nur lowercase a-z0-9_- und muss mit Buchstabe/Zahl beginnen
+# Projektname säubern
 NAME="$(echo "$RAW_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
-NAME="$(echo "$NAME" | sed 's/^[a-z0-9].*//;t;:x; s/^[^a-z0-9]//; tx')"
-# Fallback falls erste Zeile leer (extrem selten)
-if [[ -z "${NAME}" ]]; then
-  NAME="$(echo "$RAW_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')"
-fi
+NAME="$(echo "$NAME" | sed 's/^[^a-z0-9]//')"
 if [[ -z "${NAME}" ]]; then
   echo "ERROR: resulting name is empty after sanitizing."; exit 1
 fi
@@ -26,7 +22,7 @@ export POSTGRES_USER="${POSTGRES_USER:-odoo}"
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-password}"
 export POSTGRES_DB="${POSTGRES_DB:-${COMPOSE_PROJECT_NAME}_db}"
 
-# Traefik automatisch aktivieren, wenn HOST angegeben wird
+# Traefik on/off
 if [[ -n "${HOST:-}" ]]; then
   export TRAEFIK_ENABLE="true"
   export VIRTUAL_HOST="$(echo "$HOST" | tr '[:upper:]' '[:lower:]')"
@@ -34,7 +30,7 @@ else
   export TRAEFIK_ENABLE="${TRAEFIK_ENABLE:-false}"
 fi
 
-# Port nur ohne Traefik verwenden
+# Port nur ohne Traefik
 if [[ "${TRAEFIK_ENABLE}" != "true" ]]; then
   if [[ -z "${PORT:-}" ]]; then
     BASE=8069
@@ -44,10 +40,10 @@ if [[ "${TRAEFIK_ENABLE}" != "true" ]]; then
   export ODOO_PORT="${PORT}"
 fi
 
-# --- Inline-Init vorbereiten: pro Instanz einen Ordner mit entry.sh bauen ---
-INIT_DIR="./tmp/${COMPOSE_PROJECT_NAME}-init"
-mkdir -p "${INIT_DIR}"
-cat > "${INIT_DIR}/entry.sh" <<'ENTRY'
+# ---------- Init-Skript (hostseitig) vorbereiten ----------
+INIT_SRC_DIR="./tmp/${COMPOSE_PROJECT_NAME}-init-src"
+mkdir -p "${INIT_SRC_DIR}"
+cat > "${INIT_SRC_DIR}/entry.sh" <<'ENTRY'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -70,7 +66,7 @@ for i in {1..180}; do
   sleep 1
 done
 
-# Idempotente Grundinstallation
+# Idempotent initialisieren
 tries=0
 until [ $tries -ge 5 ]; do
   set +e
@@ -89,11 +85,28 @@ done
 echo "[odoo-init] starting odoo httpd..."
 exec odoo "${ODOO_DB_ARGS[@]}" -d "${DESIRED_DB}"
 ENTRY
-chmod +x "${INIT_DIR}/entry.sh"
+chmod +x "${INIT_SRC_DIR}/entry.sh"
+
+# ---------- Named Volume befüllen (ohne Host-Pfadabhängigkeit) ----------
+VOL_NAME="${COMPOSE_PROJECT_NAME}_odoo_init"
+docker volume create "${VOL_NAME}" >/dev/null
+
+# temp container starten mit gemountetem Volume
+TMP_C="initcp-${COMPOSE_PROJECT_NAME}-$$"
+docker run -d --name "${TMP_C}" -v "${VOL_NAME}:/dst" alpine:3 sh -lc "sleep 600" >/dev/null
+
+# Dateien per docker cp in den Container kopieren (funktioniert auch aus Jenkins-Container)
+docker cp "${INIT_SRC_DIR}/." "${TMP_C}:/dst/"
+
+# Rechte setzen im Container
+docker exec "${TMP_C}" sh -lc "chmod 755 /dst/entry.sh && ls -l /dst" || true
+
+# temp container beenden/aufräumen
+docker rm -f "${TMP_C}" >/dev/null 2>&1 || true
 
 echo "==> Starting ${COMPOSE_PROJECT_NAME} ..."
 
-# Start mit Init-Override (bind-mount des INIT_DIR nach /opt/odoo-init)
+# ---------- Start: Compose mit init-override (Volume) ----------
 set +e
 docker compose -p "${COMPOSE_PROJECT_NAME}" \
   -f docker-compose.yml \
@@ -102,28 +115,20 @@ docker compose -p "${COMPOSE_PROJECT_NAME}" \
 UP_RC=$?
 set -e
 
-# Schnelle Sichtprüfung, ob entry.sh drin ist
-echo "--- host init dir ---"
-ls -l "${INIT_DIR}" || true
-
-# Readiness check (max 90s), auch wenn --wait nonzero war
+# Readiness check (max 90s), unabhängig vom RC
 echo "Waiting for Odoo to be ready..."
 READY=0
 for i in $(seq 1 90); do
   if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
-    if curl -fsS -m 2 -H "Host: ${VIRTUAL_HOST}" http://127.0.0.1/web/login >/dev/null 2>&1; then
-      READY=1; break
-    fi
+    if curl -fsS -m 2 -H "Host: ${VIRTUAL_HOST}" http://127.0.0.1/web/login >/dev/null 2>&1; then READY=1; break; fi
   else
-    if curl -fsS -m 2 "http://127.0.0.1:${ODOO_PORT}/web/login" >/dev/null 2>&1; then
-      READY=1; break
-    fi
+    if curl -fsS -m 2 "http://127.0.0.1:${ODOO_PORT}/web/login" >/dev/null 2>&1; then READY=1; break; fi
   fi
   sleep 1
 done
 
 if [[ "${READY}" != "1" ]]; then
-  echo "WARN: Odoo readiness check timed out. Logs:"
+  echo "WARN: Odoo readiness check timed out. Diagnostics:"
   docker compose -p "${COMPOSE_PROJECT_NAME}" ps
   docker compose -p "${COMPOSE_PROJECT_NAME}" logs --tail=200 || true
 else
@@ -141,5 +146,5 @@ else
   echo "Open:   http://127.0.0.1:${ODOO_PORT}/web"
 fi
 
-# Niemals mit Fehler rausfallen – Diagnose übernimmt Pipeline
+# nie hart failen – Diagnose macht die Pipeline
 exit 0
