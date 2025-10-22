@@ -1,24 +1,18 @@
 pipeline {
   agent any
-  options {
-    skipDefaultCheckout(true)
-    timestamps()
-    timeout(time: 30, unit: 'MINUTES')
-  }
+  options { skipDefaultCheckout(true); timestamps(); timeout(time: 30, unit: 'MINUTES') }
 
   parameters {
-    string(name: 'COUNT',       defaultValue: '1',    description: 'Wie viele Instanzen starten')
-    string(name: 'PREFIX',      defaultValue: 'demo', description: 'Instanz-Prefix, z.B. "kunde-a-"')
-    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'leer = ohne Traefik; sonst Traefik-Domain-Basis')
-    string(name: 'PARALLEL',    defaultValue: '1',    description: 'Parallel gestartete Jobs')
+    string(name: 'COUNT',       defaultValue: '1',    description: 'Anzahl Instanzen')
+    string(name: 'PREFIX',      defaultValue: 'demo', description: 'Prefix, z.B. kunde-a-')
+    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'leer = ohne Traefik')
+    string(name: 'PARALLEL',    defaultValue: '1',    description: 'Parallelität (1 = seriell)')
   }
 
   environment {
-    // docker compose CLI ins Workspace installieren (falls auf Agent nicht vorhanden)
     DOCKER_CONFIG = "${WORKSPACE}/.docker"
     COMPOSE_CLI   = "${WORKSPACE}/.docker/cli-plugins/docker-compose"
-    // Quelle für /opt/odoo-init Bind-Mount
-    ODOO_INIT_SRC = "${WORKSPACE}/scripts/odoo-init"
+    ODOO_INIT_SRC = "${WORKSPACE}/scripts/odoo-init"   // Quelle für entry.sh (im Repo)
   }
 
   stages {
@@ -27,50 +21,63 @@ pipeline {
         checkout scm
         sh '''
           set -eux
-          # compose v2 CLI verfügbar machen
           mkdir -p "$DOCKER_CONFIG/cli-plugins"
           if [ ! -x "$COMPOSE_CLI" ]; then
             curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 -o "$COMPOSE_CLI"
             chmod +x "$COMPOSE_CLI"
           fi
           docker compose version
-
-          # Init-Skript muss existieren und ausführbar sein
           test -s "${ODOO_INIT_SRC}/entry.sh" || { echo "FEHLT: ${ODOO_INIT_SRC}/entry.sh"; exit 1; }
           chmod +x "${ODOO_INIT_SRC}/entry.sh"
         '''
       }
     }
 
-    stage('Sanity: compose render + Mount prüfen') {
+    stage('Sanity: compose render (expect volume /opt/odoo-init)') {
       steps {
         sh '''
           set -eux
-          # gerendertes compose einmal anzeigen
           docker compose config | tee .compose.rendered.yaml | sed -n '1,200p'
-
-          # Erwartung: Bind-Mount von ${ODOO_INIT_SRC} -> /opt/odoo-init
           grep -q "target: /opt/odoo-init" .compose.rendered.yaml
-          grep -q "source: ${ODOO_INIT_SRC}" .compose.rendered.yaml || echo "Hinweis: compose zeigt abs. Pfad; ok solange /opt/odoo-init target stimmt."
+          # wichtig: Kein bind auf /opt/odoo-init in der Compose-Datei!
+          ! grep -q "\\- type: bind\\s*$" -n .compose.rendered.yaml || { echo "FATAL: /opt/odoo-init darf kein bind sein"; exit 1; }
+        '''
+      }
+    }
+
+    stage('Prep init volumes (copy entry.sh into <NAME>_odoo_init)') {
+      steps {
+        sh '''
+          set -eux
+          COUNT="${COUNT:-1}"
+          for i in $(seq 1 "${COUNT}"); do
+            NAME="${PREFIX}${i}"
+            VOL="${NAME}_odoo_init"
+            echo "==> Preparing volume ${VOL}"
+            docker volume create "${VOL}"
+            # Wir kopieren vom Jenkins-Workspace in das Volume (Host-unabhängig)
+            docker run --rm \
+              -v "${VOL}:/dst" \
+              -v "${ODOO_INIT_SRC}:/src:ro" \
+              alpine:3 sh -lc '
+                set -e
+                test -s /src/entry.sh
+                rm -rf /dst/* || true
+                cp -r /src/. /dst/
+                chmod 755 /dst/entry.sh
+                ls -l /dst
+              '
+          done
         '''
       }
     }
 
     stage('Deploy batch') {
       steps {
-        withEnv([
-          "COUNT=${params.COUNT}",
-          "PREFIX=${params.PREFIX}",
-          "DOMAIN_BASE=${params.DOMAIN_BASE}",
-          "PARALLEL=${params.PARALLEL}",
-          "ODOO_INIT_SRC=${env.ODOO_INIT_SRC}"
-        ]) {
-          sh '''
-            set -eux
-            cd "${WORKSPACE}"
-            ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}" || true  # wir brechen nicht sofort ab -> Diagnose
-          '''
-        }
+        sh '''
+          set -eux
+          ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}" || true
+        '''
       }
     }
 
@@ -78,52 +85,29 @@ pipeline {
       steps {
         sh '''
           set -eux
-          # finde alle gestarteten Odoo-Container des Jobs
           LIST="$(docker ps -a --format '{{.Names}}' | grep -E '^'${PREFIX}'[0-9]+-odoo-1$' || true)"
-          if [ -z "$LIST" ]; then
-            echo "Keine Odoo-Container gefunden – nichts zu diagnostizieren."
-            exit 0
-          fi
+          [ -n "${LIST}" ] || { echo "Keine Odoo-Container gefunden."; exit 0; }
 
           EXIT=0
           for C in $LIST; do
-            echo "==> Diagnose für Container: $C"
-            docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | grep -E "^$C\\b" || true
+            echo "==> Diagnose für ${C}"
+            docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | grep -E "^${C}\\b" || true
+            echo "--- Inspect Mounts ---"
+            docker inspect "${C}" --format '{{range .Mounts}}{{println .Type .Source "->" .Destination}}{{end}}' || true
+            echo "--- Inspect Cmd ---"
+            docker inspect "${C}" --format 'Cmd: {{.Config.Cmd}}' || true
 
-            # Inspect: Mounts + Command
-            echo "--- docker inspect (Mounts, Config.Cmd) ---"
-            docker inspect "$C" --format '{{json .Mounts}}' | jq '.' || true
-            docker inspect "$C" --format 'Cmd: {{.Config.Cmd}}' || true
+            PNAME="${C%-odoo-1}"
+            echo "--- Log (odoo, last 200) ---"
+            docker compose -p "${PNAME}" logs --tail=200 odoo || true
 
-            # Prüfe, ob /opt/odoo-init gemountet ist und entry.sh ausführbar ist
-            echo "--- Dateien in /opt/odoo-init ---"
-            docker exec "$C" sh -lc 'ls -l /opt/odoo-init || true'
-
-            echo "--- entry.sh Inhalt (erste 80 Zeilen) ---"
-            docker exec "$C" sh -lc 'sed -n "1,80p" /opt/odoo-init/entry.sh || true'
-
-            echo "--- Shell-Syntax-Check ---"
-            docker exec "$C" sh -lc 'bash -n /opt/odoo-init/entry.sh || echo "bash -n meldet Fehler"; true'
-
-            echo "--- Env in Container (relevant) ---"
-            docker exec "$C" sh -lc 'env | egrep "DB_HOST|DB_PORT|DB_USER|DB_PASSWORD|DESIRED_DB|COMPOSE_PROJECT_NAME" || true'
-
-            echo "--- letze 200 Zeilen Odoo-Log ---"
-            PNAME="${C%-odoo-1}"   # Compose-Projektname
-            docker compose -p "$PNAME" logs --tail=200 odoo || true
-
-            # Health prüfen
-            STATE="$(docker inspect "$C" --format '{{.State.Health.Status}}' 2>/dev/null || echo 'unknown')"
-            echo "Health: $STATE"
-            if [ "$STATE" != "healthy" ]; then
-              EXIT=1
-            fi
+            STATE="$(docker inspect "${C}" --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)"
+            echo "Health: ${STATE}"
+            if [ "${STATE}" != "healthy" ]; then EXIT=1; fi
           done
 
-          # wenn irgendwer ungesund war, als Fehler markieren -> Smoke wird dann übersprungen
-          if [ $EXIT -ne 0 ]; then
-            echo "Mindestens eine Odoo-Instanz ist unhealthy."
-            exit 1
+          if [ ${EXIT} -ne 0 ]; then
+            echo "Mindestens eine Instanz ist unhealthy."; exit 1
           fi
         '''
       }
