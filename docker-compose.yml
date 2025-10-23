@@ -38,16 +38,20 @@ services:
     volumes:
       - odoo_data:/var/lib/odoo
       - ./addons:/mnt/extra-addons:ro
+      # >>> WICHTIG: Bind-Mount direkt aus Repo (überschreibbar per ODOO_INIT_SRC)
       - ${ODOO_INIT_SRC:-./scripts/odoo-init}:/opt/odoo-init:ro
     labels:
+      # Basis
       - "traefik.enable=${TRAEFIK_ENABLE:-false}"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.rule=Host(`${VIRTUAL_HOST:-}`)"
+      # HTTP Router (fällt nur zurück, wenn TLS aus ist)
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.entrypoints=${TRAEFIK_ENTRYPOINTS:-web}"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.rule=Host(`${VIRTUAL_HOST:-}`)"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.service=${COMPOSE_PROJECT_NAME}"
       - "traefik.http.services.${COMPOSE_PROJECT_NAME}.loadbalancer.server.port=8069"
+      # TLS (aktiv, wenn FORCE_HTTPS=true gesetzt -> Jenkins setzt TRAEFIK_ENTRYPOINTS=websecure)
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls=${TRAEFIK_TLS:-false}"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls.certresolver=${TRAEFIK_TLS_RESOLVER:-}"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls.certresolver=${LE_RESOLVER:-le}"
     networks: [default, proxy]
 
 volumes:
