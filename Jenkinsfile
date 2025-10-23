@@ -4,7 +4,7 @@ pipeline {
   parameters {
     string(name: 'COUNT',       defaultValue: '1',                description: 'Wieviele Instanzen?')
     string(name: 'PREFIX',      defaultValue: 'demo',             description: 'Instanz-Präfix')
-    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.nip.io', description: 'Basisdomain für Traefik')
+    string(name: 'DOMAIN_BASE', defaultValue: '91-107-228-241.sslip.io', description: 'Basisdomain für Traefik')
     string(name: 'PARALLEL',    defaultValue: '1',                description: 'Wie viele parallel starten')
   }
   environment { DOCKER_CONFIG = "${WORKSPACE}/.docker" }
