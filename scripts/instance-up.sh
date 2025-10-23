@@ -106,11 +106,12 @@ docker rm -f "${TMP_C}" >/dev/null 2>&1 || true
 
 echo "==> Starting ${COMPOSE_PROJECT_NAME} ..."
 
-# ---------- Start: Compose mit init-override (Volume) ----------
+# ---------- Start: Compose mit init-override (Volume) + HTTPS-Overlay ----------
 set +e
 docker compose -p "${COMPOSE_PROJECT_NAME}" \
   -f docker-compose.yml \
   -f docker-compose.init.yml \
+  -f docker-compose.le.yml \
   up -d --wait
 UP_RC=$?
 set -e
@@ -138,8 +139,7 @@ fi
 # Hints
 if [[ "${TRAEFIK_ENABLE}" == "true" ]]; then
   echo "Test:   curl -sI --resolve '${VIRTUAL_HOST}:80:127.0.0.1' http://${VIRTUAL_HOST}/web/login | sed -n '1,5p'"
-  echo "Open:   http://${VIRTUAL_HOST}/web"
-  echo "Note:   Request via Traefik (:80) – deshalb '--resolve …:80:127.0.0.1'."
+  echo "Open:   https://${VIRTUAL_HOST}/web"
 else
   echo "Port:   ${ODOO_PORT}"
   echo "Test:   curl -sI http://127.0.0.1:${ODOO_PORT}/web/login | sed -n '1,5p'"
