@@ -46,8 +46,8 @@ services:
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.entrypoints=${TRAEFIK_ENTRYPOINTS:-web}"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.service=${COMPOSE_PROJECT_NAME}"
       - "traefik.http.services.${COMPOSE_PROJECT_NAME}.loadbalancer.server.port=8069"
-      - "${TRAEFIK_TLS_LABEL1:-}"
-      - "${TRAEFIK_TLS_LABEL2:-}"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls=${TRAEFIK_TLS:-false}"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls.certresolver=${TRAEFIK_TLS_RESOLVER:-}"
     networks: [default, proxy]
 
 volumes:

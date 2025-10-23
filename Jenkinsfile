@@ -70,20 +70,24 @@ grep -q "/scripts/odoo-init" .compose.rendered.yaml || echo "Hinweis: compose ze
         ]) {
           sh '''#!/usr/bin/env bash
 set -eux
+# Traefik-Schalter für Compose (ohne ${COMPOSE_PROJECT_NAME} in der Shell zu benutzen!)
 if [ "${ENABLE_TRAEFIK}" = "true" ] && [ -n "${DOMAIN_BASE}" ]; then
   export TRAEFIK_ENABLE=true
 else
   export TRAEFIK_ENABLE=false
 fi
+
+# HTTPS/TLS für Compose via Variablen steuern (Compose expandiert im YAML)
 if [ "${FORCE_HTTPS}" = "true" ]; then
   export TRAEFIK_ENTRYPOINTS="websecure"
-  export TRAEFIK_TLS_LABEL1="traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls=true"
-  export TRAEFIK_TLS_LABEL2="traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls.certresolver=le"
+  export TRAEFIK_TLS="true"
+  export TRAEFIK_TLS_RESOLVER="le"
 else
   export TRAEFIK_ENTRYPOINTS="web"
-  export TRAEFIK_TLS_LABEL1=
-  export TRAEFIK_TLS_LABEL2=
+  export TRAEFIK_TLS="false"
+  export TRAEFIK_TLS_RESOLVER=""
 fi
+
 cd "${WORKSPACE}"
 ./scripts/instances-batch.sh "${COUNT}" "${PREFIX}" "${DOMAIN_BASE}" "${PARALLEL}" || true
 '''
