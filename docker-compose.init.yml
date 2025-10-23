@@ -1,3 +1,8 @@
+services:
+  odoo:
+    volumes:
+      - odoo_init:/opt/odoo-init:ro
+
 volumes:
   odoo_init:
     name: "${COMPOSE_PROJECT_NAME}_odoo_init"
