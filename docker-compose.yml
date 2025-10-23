@@ -38,24 +38,16 @@ services:
     volumes:
       - odoo_data:/var/lib/odoo
       - ./addons:/mnt/extra-addons:ro
-      # WICHTIG: Bind-Mount direkt aus Repo (überschreibbar per ODOO_INIT_SRC)
       - ${ODOO_INIT_SRC:-./scripts/odoo-init}:/opt/odoo-init:ro
     labels:
-      # HTTP
       - "traefik.enable=${TRAEFIK_ENABLE:-false}"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.entrypoints=web"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.rule=Host(`${VIRTUAL_HOST:-}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.entrypoints=${TRAEFIK_ENTRYPOINTS:-web}"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.service=${COMPOSE_PROJECT_NAME}"
       - "traefik.http.services.${COMPOSE_PROJECT_NAME}.loadbalancer.server.port=8069"
-
-      # OPTIONAL: HTTPS (aktiv wenn TRAEFIK_TLS=true)
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-tls.entrypoints=websecure"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-tls.rule=Host(`${VIRTUAL_HOST:-}`)"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-tls.tls=${TRAEFIK_TLS:-false}"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-tls.tls.certresolver=${CERT_RESOLVER:-le}"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-tls.service=${COMPOSE_PROJECT_NAME}"
-
+      - "${TRAEFIK_TLS_LABEL1:-}"
+      - "${TRAEFIK_TLS_LABEL2:-}"
     networks: [default, proxy]
 
 volumes:
